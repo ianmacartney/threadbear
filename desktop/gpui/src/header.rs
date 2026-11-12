@@ -345,22 +345,25 @@ impl Threadbear {
         tipped!(div().id("header-zed").flex_none().h(px(26.)).px(px(7.)).flex().items_center().rounded(px(6.)).text_size(px(style::size::DETAIL)).text_color(color).when(!enabled || busy, |s| s.opacity(0.35)).hover(move |s| s.bg(hover)), tip)
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .when(enabled && !busy, |s| s.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                if !this.begin_note(&key, "Opening Zed…", cx) { return; }
-                let thread = thread.clone();
-                let key = key.clone();
-                cx.spawn(async move |this, cx| {
-                    let result = cx.background_executor().spawn(async move { crate::open_gate::open_thread_in_zed(&thread) }).await;
-                    this.update(cx, |this, cx| {
-                        this.end_note(&key, cx);
-                        match result {
-                            Ok(()) => this.flash_done("Opened in Zed", cx),
-                            Err(error) => this.show_error(error, cx),
-                        }
-                    }).ok();
-                }).detach();
+                this.open_zed_for_thread(thread.clone(), cx);
             })))
             .child(if busy { "Opening…" } else { "Zed" })
             .into_any_element()
+    }
+
+    pub(crate) fn open_zed_for_thread(&mut self, thread: ThreadSummary, cx: &mut Context<Self>) {
+        let key = format!("zed:{}", thread.id);
+        if !self.begin_note(&key, "Opening Zed…", cx) { return; }
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_executor().spawn(async move { crate::open_gate::open_thread_in_zed(&thread) }).await;
+            this.update(cx, |this, cx| {
+                this.end_note(&key, cx);
+                match result {
+                    Ok(()) => this.flash_done("Opened in Zed", cx),
+                    Err(error) => this.show_error(error, cx),
+                }
+            }).ok();
+        }).detach();
     }
 
     /// `HistoryButton`: ‹ or ›, tipped with where it goes, dimmed with nowhere.

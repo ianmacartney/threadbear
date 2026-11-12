@@ -152,3 +152,7 @@ Then("Zed opens the selected thread's current folder", async function (this: Thr
 When('I click the header’s Zed button', async function (this: ThreadbearWorld) {
   await this.app.do({ cmd: 'click', tip: 'Open in Zed' });
 });
+
+When('I press Command O to open Zed', async function (this: ThreadbearWorld) {
+  await this.app.do({ cmd: 'menu-key', key: 'o', modifiers: ['cmd'] });
+});

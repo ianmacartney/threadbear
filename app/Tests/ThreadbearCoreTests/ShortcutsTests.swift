@@ -8,6 +8,11 @@ final class ShortcutsTests: XCTestCase {
 
     // MARK: Keys
 
+    func testOpenInZedUsesCommandO() {
+        XCTAssertEqual(ShortcutCommand.openInZed.defaultKey, ShortcutKey("o"))
+        XCTAssertEqual(ShortcutBindings().command(using: ShortcutKey("o")), .openInZed)
+    }
+
     func testAKeyReadsAndWritesTheWayTheFileSaysIt() {
         XCTAssertEqual(ShortcutKey("n"), key("cmd+n"))
         XCTAssertEqual(key("cmd+opt+down").string, "cmd+opt+down")
@@ -79,7 +84,7 @@ final class ShortcutsTests: XCTestCase {
     /// should change by updating.
     func testTheDefaultsAreTheKeysPeopleAlreadyKnow() {
         let expected: [ShortcutCommand: String] = [
-            .newThread: "⌘N", .archive: "⌘E", .stop: "⌘.", .copyTranscript: "⇧⌘C",
+            .newThread: "⌘N", .openInZed: "⌘O", .archive: "⌘E", .stop: "⌘.", .copyTranscript: "⇧⌘C",
             .back: "⌘[", .forward: "⌘]", .nextInboxThread: "⌥⌘↓", .previousTab: "⇧⌘[", .nextTab: "⇧⌘]",
             .showInbox: "⌘1", .showScheduled: "⌘2", .showProjects: "⌘3", .showLibrarian: "⌘4",
             .zoomIn: "⌘=", .zoomOut: "⌘-", .actualSize: "⌘0",

@@ -50,7 +50,7 @@ pub const SEARCH_PROMPT: &str = "Search shortcuts";
 pub fn group(command: ShortcutCommand) -> Group {
     use ShortcutCommand::*;
     match command {
-        NewThread | Archive | Hibernate | Stop | CopyTranscript => Group::Threads,
+        NewThread | Archive | Hibernate | Stop | CopyTranscript | OpenInZed => Group::Threads,
         Back | Forward | NextInboxThread | ShowInbox | ShowScheduled | ShowProjects | ShowLibrarian | ShowHibernating | ShowArchived | Settings => Group::Go,
         ZoomIn | ZoomOut | ActualSize | ToggleThreads | TogglePanels | ToggleTerminal | ResetPanelLayout | CollapseThreads => Group::View,
     }

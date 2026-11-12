@@ -119,3 +119,10 @@ Feature: The thread's bar, banners and notes
     When I open the thread "Morning brief"
     And I click the header’s Zed button
     Then Zed opens the selected thread's current folder
+
+  @header.more
+  Scenario: Command O opens the current thread in Zed
+    Given the thread "Morning brief" works in a folder of its own
+    When I open the thread "Morning brief"
+    And I press Command O to open Zed
+    Then Zed opens the selected thread's current folder

@@ -143,6 +143,7 @@ impl ShortcutKey {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ShortcutCommand {
     NewThread,
+    OpenInZed,
     Archive,
     Hibernate,
     Stop,
@@ -169,8 +170,9 @@ pub enum ShortcutCommand {
 }
 
 impl ShortcutCommand {
-    pub const ALL: [ShortcutCommand; 23] = [
+    pub const ALL: [ShortcutCommand; 24] = [
         Self::NewThread,
+        Self::OpenInZed,
         Self::Archive,
         Self::Hibernate,
         Self::Stop,
@@ -198,6 +200,7 @@ impl ShortcutCommand {
     pub fn name(self) -> &'static str {
         match self {
             Self::NewThread => "newThread",
+            Self::OpenInZed => "openInZed",
             Self::Archive => "archive",
             Self::Hibernate => "hibernate",
             Self::Stop => "stop",
@@ -230,6 +233,7 @@ impl ShortcutCommand {
     pub fn title(self) -> &'static str {
         match self {
             Self::NewThread => "New Thread",
+            Self::OpenInZed => "Open in Zed",
             Self::Archive => "Archive",
             Self::Hibernate => "Hibernate",
             Self::Stop => "Stop",
@@ -258,6 +262,7 @@ impl ShortcutCommand {
     pub fn default_key(self) -> Option<ShortcutKey> {
         match self {
             Self::NewThread => Some(ShortcutKey::new("n")),
+            Self::OpenInZed => Some(ShortcutKey::new("o")),
             Self::Settings => Some(ShortcutKey::new(",")),
             Self::Archive => Some(ShortcutKey::new("e")),
             Self::Stop => Some(ShortcutKey::new(".")),

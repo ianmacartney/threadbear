@@ -136,7 +136,7 @@ public enum ShortcutGroup: String, CaseIterable, Sendable {
 /// checks), so it shows on the Keyboard page and people can change it. The
 /// raw values are shortcuts.json's names: leave them alone once they've shipped.
 public enum ShortcutCommand: String, CaseIterable, Sendable {
-    case newThread, archive, hibernate, stop, copyTranscript
+    case newThread, archive, hibernate, stop, copyTranscript, openInZed
     case back, forward, nextInboxThread, showInbox, showScheduled, showProjects, showLibrarian, showHibernating, showArchived
     // A project's page tabs (Decisions, Project), as Safari's tabs go.
     case previousTab, nextTab
@@ -149,7 +149,7 @@ public enum ShortcutCommand: String, CaseIterable, Sendable {
 
     public var group: ShortcutGroup {
         switch self {
-        case .newThread, .archive, .hibernate, .stop, .copyTranscript: .threads
+        case .newThread, .archive, .hibernate, .stop, .copyTranscript, .openInZed: .threads
         case .back, .forward, .nextInboxThread, .showInbox, .showScheduled, .showProjects, .showLibrarian, .showHibernating, .showArchived, .previousTab, .nextTab: .go
         case .zoomIn, .zoomOut, .actualSize, .toggleThreads, .togglePanels, .toggleTerminal, .resetPanelLayout, .collapseThreads: .view
         // The app menu's Settings…, which opens the Settings window.
@@ -160,6 +160,7 @@ public enum ShortcutCommand: String, CaseIterable, Sendable {
     public var title: String {
         switch self {
         case .newThread: "New Thread"
+        case .openInZed: "Open in Zed"
         case .archive: "Archive"
         case .hibernate: "Hibernate"
         case .stop: "Stop"
@@ -206,6 +207,7 @@ public enum ShortcutCommand: String, CaseIterable, Sendable {
     public var defaultKey: ShortcutKey? {
         switch self {
         case .newThread: ShortcutKey("n")
+        case .openInZed: ShortcutKey("o")
         case .settings: ShortcutKey(",")
         case .archive: ShortcutKey("e")
         case .stop: ShortcutKey(".")

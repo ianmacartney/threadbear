@@ -67,6 +67,10 @@ struct ThreadbearApp: App {
                 IconMenuItems {
                     Button("New Thread", systemImage: "square.and.pencil") { app.newThread() }
                         .shortcut(.newThread)
+                    Button("Open in Zed", systemImage: "square.and.pencil") {
+                        if !app.showsHomePage, app.openProject == nil, let thread = app.selectedThread, OpenGate.openInZed(thread) { app.flashDone("Opened in Zed") }
+                    }
+                    .shortcut(.openInZed)
                 }
             }
             // In the View menu, as the Electron agent apps and Safari have

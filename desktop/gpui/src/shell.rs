@@ -243,6 +243,7 @@ actions!(
     threadbear,
     [
         NewThread,
+        OpenInZed,
         ArchiveThread,
         PickHibernateTime,
         WakeWhenPrompt,
@@ -331,6 +332,7 @@ commands!(
     (WakeWhen, WakeWhenPrompt, None),
     (Stop, StopTurn, Some(ShortcutCommand::Stop)),
     (CopyTranscript, CopyTranscript, Some(ShortcutCommand::CopyTranscript)),
+    (OpenInZed, OpenInZed, Some(ShortcutCommand::OpenInZed)),
     (Back, GoBack, Some(ShortcutCommand::Back)),
     (Forward, GoForward, Some(ShortcutCommand::Forward)),
     (NextInboxThread, NextInboxThread, Some(ShortcutCommand::NextInboxThread)),
@@ -676,6 +678,11 @@ impl Threadbear {
             Command::ActualSize => self.set_zoom(zoom::DEFAULT_PERCENT, window, cx),
             Command::ToggleThreads => self.toggle_threads_panel(cx),
             Command::TogglePanels => self.toggle_panels(cx),
+            Command::OpenInZed => {
+                if self.home_page().is_none() && self.projects.open.is_none() {
+                    if let Some(thread) = self.open_thread().cloned() { self.open_zed_for_thread(thread, cx); }
+                }
+            }
             Command::ToggleTerminal => crate::terminal::toggle(self, window, cx),
             Command::ResetPanelLayout => self.reset_panel_layout(cx),
             Command::CollapseThreads => self.toggle_threads_collapsed(cx),
@@ -1126,7 +1133,7 @@ impl Threadbear {
                     ])
                     .collect(),
             ),
-            TopMenu::new("File", vec![item("New Thread", Command::NewThread), Separator, item("Close", Command::Close)]),
+            TopMenu::new("File", vec![item("New Thread", Command::NewThread), item("Open in Zed", Command::OpenInZed).enabled(has_thread), Separator, item("Close", Command::Close)]),
             // The text commands, as AppKit's standard Edit menu has them;
             // AppKit adds AutoFill, Start Dictation and Emoji & Symbols
             // under them on a Mac (window_menu.rs).
