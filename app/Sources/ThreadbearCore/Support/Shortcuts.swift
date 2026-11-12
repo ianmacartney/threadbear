@@ -136,7 +136,7 @@ public enum ShortcutGroup: String, CaseIterable, Sendable {
 /// checks), so it shows on the Keyboard page and people can change it. The
 /// raw values are shortcuts.json's names: leave them alone once they've shipped.
 public enum ShortcutCommand: String, CaseIterable, Sendable {
-    case newThread, archive, hibernate, stop, copyTranscript, openInZed
+    case newThread, openInZed, archive, hibernate, stop, copyTranscript
     case back, forward, nextInboxThread, showInbox, showScheduled, showProjects, showLibrarian, showHibernating, showArchived
     // A project's page tabs (Decisions, Project), as Safari's tabs go.
     case previousTab, nextTab

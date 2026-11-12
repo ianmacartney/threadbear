@@ -393,7 +393,7 @@ mod tests {
     #[test]
     fn the_groups_are_the_swift_pages() {
         let titles = |g: Group| g.commands().into_iter().map(ShortcutCommand::title).collect::<Vec<_>>();
-        assert_eq!(titles(Group::Threads), ["New Thread", "Archive", "Hibernate", "Stop", "Copy Transcript as Markdown"]);
+        assert_eq!(titles(Group::Threads), ["New Thread", "Open in Zed", "Archive", "Hibernate", "Stop", "Copy Transcript as Markdown"]);
         assert_eq!(titles(Group::Go)[..3], ["Back", "Forward", "Next Inbox Thread"]);
         assert_eq!(titles(Group::Go).last(), Some(&"Settings…"));
         assert_eq!(titles(Group::View).first(), Some(&"Zoom In"));
