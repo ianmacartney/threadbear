@@ -342,6 +342,30 @@ struct ThreadHeader: View {
     }
 }
 
+/// Opens this panel's working folder for manual editing in Zed.
+struct ZedButton: View {
+    @Environment(AppModel.self) private var app
+    var pinned: String? = nil
+
+    var body: some View {
+        let thread = pinned.map { app.threads[$0] } ?? (pinned == nil && app.openProject == nil && !app.showsHomePage ? app.selectedThread : nil)
+        let available = thread.map { TerminalTarget.for($0, runnerName: { _ in nil }).note == nil } ?? false
+        Button("Zed") {
+            guard let thread else { return }
+            if OpenGate.openInZed(thread) { app.flashDone("Opened in Zed") }
+        }
+        .font(.system(size: TypeScale.label))
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, zoomed(7))
+        .frame(height: zoomed(26))
+        .buttonStyle(.plain)
+        .tip(available ? "Open in Zed" : "This thread’s folder is unavailable for editing on this Mac")
+        .disabled(!available)
+        .opacity(thread == nil ? 0 : 1)
+        .fixedSize()
+    }
+}
+
 /// The thread panel's ... menu, at the end of its bar. Out of sight with
 /// nothing to act on: a dimmed "..." alone over an empty new thread looked
 /// broken.

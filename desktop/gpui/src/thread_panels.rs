@@ -230,8 +230,9 @@ impl Threadbear {
     pub(crate) fn thread_panel_buttons(&mut self, panel: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
         let thread = self.threads.get(pinned_thread(panel)?).cloned()?;
         let share = self.website_url.is_some().then(|| self.render_share_button(&thread, cx));
+        let editor = self.render_zed_button(&thread, cx);
         let more = self.render_more_button(&thread, cx);
-        Some(h_flex().flex_none().items_center().children(share).child(more).into_any_element())
+        Some(h_flex().flex_none().items_center().child(editor).children(share).child(more).into_any_element())
     }
 
     /// What a thread's own panel shows (`PinnedThreadView`): its sign-in

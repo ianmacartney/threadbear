@@ -7,6 +7,11 @@ and points `upstream` at `mikecann/threadbear`. Read on if you want to
 publish your own build (your own App Store app, your own crash reports,
 your own releases for others) or take features out.
 
+The Zed toolbar button lives in `Views/DetailView.swift` and `WindowDock.swift`
+with its launcher in `OpenGate.swift`; the GPUI equivalents are `header.rs`,
+`thread_panels.rs` and `open_gate.rs`. Remove those buttons and launchers to
+remove the editor shortcut. It opens the selected local thread’s folder.
+
 ## 1. What's Mike's, and where
 
 These only matter if you ship your own build to other people. Leave them

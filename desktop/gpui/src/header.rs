@@ -327,8 +327,40 @@ impl Threadbear {
         let back = self.render_history_button(true, cx);
         let forward = self.render_history_button(false, cx);
         let share = thread.as_ref().filter(|_| self.website_url.is_some()).map(|t| self.render_share_button(t, cx));
+        let editor = thread.as_ref().map(|t| self.render_zed_button(t, cx));
         let more = thread.as_ref().map(|t| self.render_more_button(t, cx)).or_else(|| self.render_project_more_button(cx));
-        h_flex().flex_none().items_center().child(back).child(forward).children(share).children(more).into_any_element()
+        h_flex().flex_none().items_center().child(back).child(forward).children(editor).children(share).children(more).into_any_element()
+    }
+
+    /// Opens this panel's thread folder, including its worktree, for manual edits.
+    pub(crate) fn render_zed_button(&mut self, thread: &ThreadSummary, cx: &mut Context<Self>) -> AnyElement {
+        let target = threadbear_core::terminal::target_for(Some(thread), "", None, |p| std::path::Path::new(p).is_dir());
+        let enabled = target.note.is_none();
+        let key = format!("zed:{}", thread.id);
+        let busy = self.busy_notes.iter().any(|(k, _)| k == &key);
+        let tip = target.note.unwrap_or_else(|| "Open in Zed".to_owned());
+        let thread = thread.clone();
+        let hover = style::sidebar_hover(cx);
+        let color = style::secondary_text(cx);
+        tipped!(div().id("header-zed").flex_none().h(px(26.)).px(px(7.)).flex().items_center().rounded(px(6.)).text_size(px(style::size::DETAIL)).text_color(color).when(!enabled || busy, |s| s.opacity(0.35)).hover(move |s| s.bg(hover)), tip)
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .when(enabled && !busy, |s| s.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                if !this.begin_note(&key, "Opening Zed…", cx) { return; }
+                let thread = thread.clone();
+                let key = key.clone();
+                cx.spawn(async move |this, cx| {
+                    let result = cx.background_executor().spawn(async move { crate::open_gate::open_thread_in_zed(&thread) }).await;
+                    this.update(cx, |this, cx| {
+                        this.end_note(&key, cx);
+                        match result {
+                            Ok(()) => this.flash_done("Opened in Zed", cx),
+                            Err(error) => this.show_error(error, cx),
+                        }
+                    }).ok();
+                }).detach();
+            })))
+            .child(if busy { "Opening…" } else { "Zed" })
+            .into_any_element()
     }
 
     /// `HistoryButton`: ‹ or ›, tipped with where it goes, dimmed with nowhere.

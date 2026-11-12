@@ -401,3 +401,21 @@ fn describe_app(app: &objc2_foundation::NSURL) -> Option<OpeningApp> {
     let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "its app".to_owned());
     Some(OpeningApp { path, bundle_id, name })
 }
+
+/// A deliberate toolbar click opens a local thread's folder in the fixed editor.
+/// Run off the UI thread; no shell parses the folder, including spaces or flags.
+pub(crate) fn open_thread_in_zed(thread: &threadbear_core::inbox::ThreadSummary) -> Result<(), String> {
+    let target = threadbear_core::terminal::target_for(Some(thread), "", None, |p| Path::new(p).is_dir());
+    if let Some(reason) = target.note { return Err(reason); }
+    if !Path::new(&target.cwd).is_absolute() { return Err("This thread's folder must be an absolute path.".into()); }
+    if scripted_opens(&format!("zed:{}", target.cwd)) { return Ok(()); }
+    #[cfg(target_os = "macos")]
+    let output = std::process::Command::new("/usr/bin/open").args(["-a", "Zed", "--", &target.cwd]).output();
+    #[cfg(not(target_os = "macos"))]
+    let output = std::process::Command::new("zed").args(["--", &target.cwd]).output();
+    match output {
+        Ok(out) if out.status.success() => Ok(()),
+        Ok(out) => Err(format!("Couldn't open Zed: {}", String::from_utf8_lossy(&out.stderr).trim())),
+        Err(error) => Err(format!("Couldn't open Zed. Check that it is installed: {error}")),
+    }
+}

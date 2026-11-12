@@ -682,6 +682,11 @@ Show or Hide Panels (⌥⌘P) for the panels beside the thread, Show or Hide
 Terminal (⌘J), and Reset Panel Layout, which puts everything back how it
 started. Threadbear remembers your layout between launches.
 
+The **Zed** button in a thread’s top bar opens its current folder in Zed for
+manual editing, including its worktree when it has one. Zed must be installed.
+It is unavailable for archived threads, threads on another machine, and folders
+that no longer exist.
+
 ### Terminal
 <!-- slug: terminal -->
 

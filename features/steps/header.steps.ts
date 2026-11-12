@@ -142,3 +142,13 @@ When("I click the header's Scheduled chip for {string}", async function (this: T
 Then('the box has {string} just above it', async function (this: ThreadbearWorld, words: string) {
   await this.until(`"${words}" over the box`, (d) => (d.composer as { offerAbove?: string | null }).offerAbove === words, 10_000);
 });
+
+Then("Zed opens the selected thread's current folder", async function (this: ThreadbearWorld) {
+  const d = await this.app.dump();
+  const opened = await this.app.do({ cmd: 'opened' });
+  assert.ok(d.composer?.cwd && (opened.includes(`zed:${d.composer.cwd}`) || opened.includes(new URL(`file://${d.composer.cwd}`).href)), `opened: ${opened}`);
+});
+
+When('I click the header’s Zed button', async function (this: ThreadbearWorld) {
+  await this.app.do({ cmd: 'click', tip: 'Open in Zed' });
+});

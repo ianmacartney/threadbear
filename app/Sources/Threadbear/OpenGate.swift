@@ -304,6 +304,24 @@ enum OpenGate {
     /// A page or file the code itself names: Threadbear's docs and
     /// website, its own logs, a script or page it has just written. Never
     /// anything a runner, a page, the backend or an agent gave.
+    static var zedApplication: () -> URL? = { NSWorkspace.shared.urlForApplication(withBundleIdentifier: "dev.zed.Zed") }
+
+    /// A toolbar click targets the fixed editor, with a file URL, never a shell.
+    @discardableResult
+    static func openInZed(_ thread: ThreadSummary) -> Bool {
+        let target = TerminalTarget.for(thread, runnerName: { _ in nil })
+        guard target.note == nil else {
+            refuse("This thread’s folder is unavailable for editing on this Mac.")
+            return false
+        }
+        guard let editor = zedApplication() else {
+            refuse("Zed is not installed. Install Zed to open this folder.")
+            return false
+        }
+        workspaceOpenWith(URL(fileURLWithPath: target.cwd, isDirectory: true), editor)
+        return true
+    }
+
     static func openOwn(_ url: URL) {
         workspaceOpen(url)
     }

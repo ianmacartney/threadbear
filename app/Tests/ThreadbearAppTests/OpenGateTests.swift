@@ -18,6 +18,30 @@ final class OpenGateTests: XCTestCase {
     private var savedBundleId: (URL) -> String? = { _ in nil }
     private var saved: (open: (URL) -> Void, openWith: (URL, URL) -> Void, ask: (OpenGate.Question) -> Bool, refuse: (String) -> Void, appFor: (URL) -> URL?)!
 
+    func testZedOpensTheCurrentFolderAndRefusesUnavailableThreads() throws {
+        let savedZed = OpenGate.zedApplication
+        defer { OpenGate.zedApplication = savedZed }
+        OpenGate.zedApplication = { URL(fileURLWithPath: "/Applications/Zed.app") }
+        let worktree = folder.appendingPathComponent("work tree #1", isDirectory: true)
+        try FileManager.default.createDirectory(at: worktree, withIntermediateDirectories: true)
+        var thread = ThreadSummary(id: "zed", title: "Edit", cwd: worktree.path)
+        XCTAssertTrue(OpenGate.openInZed(thread))
+        XCTAssertEqual(opened.map(\.path), [worktree.path])
+        thread.runnerId = "another-mac"
+        XCTAssertFalse(OpenGate.openInZed(thread))
+        thread.runnerId = nil
+        thread.archivedAt = Date()
+        XCTAssertFalse(OpenGate.openInZed(thread))
+        thread.archivedAt = nil
+        thread.cwd = worktree.appendingPathComponent("gone").path
+        XCTAssertFalse(OpenGate.openInZed(thread))
+        XCTAssertEqual(opened.count, 1)
+        thread.cwd = worktree.path
+        OpenGate.zedApplication = { nil }
+        XCTAssertFalse(OpenGate.openInZed(thread))
+        XCTAssertTrue(refused.last?.contains("not installed") == true)
+    }
+
     override func setUp() async throws {
         folder = FileManager.default.temporaryDirectory.appendingPathComponent("tb-open-gate-\(UUID().uuidString)", isDirectory: true)
             .resolvingSymlinksInPath()

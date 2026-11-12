@@ -111,3 +111,11 @@ Feature: The thread's bar, banners and notes
     When I open the thread "Morning brief"
     And I send "mock refusal please"
     Then the box has "Continue with Codex Sol" just above it
+
+  # Scripted apps record the folder instead of starting the external editor.
+  @header.more
+  Scenario: Open the current worktree in Zed for manual editing
+    Given the thread "Morning brief" works in a folder of its own
+    When I open the thread "Morning brief"
+    And I click the header’s Zed button
+    Then Zed opens the selected thread's current folder
