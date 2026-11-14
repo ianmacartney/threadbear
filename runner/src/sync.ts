@@ -46,6 +46,7 @@ import { Scrubber, type ScrubStatus } from './scrub.ts';
 import { scrubEveryString } from './redaction.ts';
 import { withholdReason } from './withhold.ts';
 import { BodyCollector, prepareBody, type BodyDoc, type RawBody } from './full-sync.ts';
+import type { ConvexUse, ConvexUseTally } from './convex-use.ts';
 import { cutSafely } from './safe-cut.ts';
 import { siteOf } from './convex-admin.ts';
 import { credentialUrlProblem } from './secure-url.ts';
@@ -58,6 +59,8 @@ const CALL_ENTRIES = 500;
 // thread's preview and working line change many times a second.
 export const SYNC_COALESCE_MS = 2000;
 export const HEARTBEAT_MS = 60_000;
+// How many heartbeats a finishCommand that failed is tried again with.
+export const FINISH_TRIES = 60;
 // How often other runners' usage readings are read (followSharedUsage).
 export const SHARED_USAGE_POLL_MS = 5 * 60_000;
 // Threads per upsert mutation, and messages per append.
@@ -65,6 +68,8 @@ export const SYNC_BATCH = 50;
 export const MESSAGE_BATCH = 100;
 // A message longer than this is cut on the phone; the Mac has it all.
 export const MESSAGE_CHARS = 8000;
+// A login's note (role "note") is a sentence or two of the runner's.
+const NOTE_CHARS = 500;
 // A plan gets more room: it's read whole on the phone before Go ahead, and
 // one cut at 8,000 would hide the steps at the end that it approves.
 export const PLAN_CHARS = 24_000;
@@ -120,10 +125,11 @@ export type SyncConfig = {
   name?: string;
   runnerId?: string;
   icon?: string;
-  rpcUrl?: string;
   pastedPictures?: boolean;
   // Full sync (docs/full-convex.md step 4): tool output, input and diffs go up too.
   // Off unless it's asked for; off, nothing here writes eventBodies.
+  // false hides the estimate's warning near Convex's Free limits (convex-use.ts).
+  usageWarning?: boolean;
   full?: boolean;
 };
 
@@ -133,7 +139,11 @@ export type SyncConfig = {
 // lower one means its backend hasn't been deployed since this runner was:
 // said in runner.status, tb status and the log rather than stopping, since
 // the runner only adds to what it sends while the number stays the same.
-export const BACKEND_API_VERSION = 76;
+export const BACKEND_API_VERSION = 79;
+// From this one a message row can be a login's note (role "note"): a thread
+// that moved to another login or is waiting for room says so on another Mac.
+export const LOGIN_NOTES_API_VERSION = 78;
+const HELD_NOTES = 200;
 // From this one sync:sharedThreads lists a runner's rows shared by link, which
 // it checks against its own threads on every start and every
 // SHARE_RECONCILE_MS (reconcileShares).
@@ -222,8 +232,7 @@ export const SCHEDULES_API_VERSION = 9;
 // From this one the heartbeat carries the runner's icon (machine.ts); an
 // older backend's validator would turn the heartbeat down.
 export const RUNNER_ICON_API_VERSION = 11;
-// From this one there's the sidebar table (thread-index.ts) and the
-// heartbeat carries rpcUrl (step 6 part 2).
+// From this one there's the sidebar table (thread-index.ts).
 export const THREAD_INDEX_API_VERSION = 12;
 // From this one a thread's row carries `woke` (back from hibernating, not
 // opened yet), for the phone's "Woke up". An older backend's validator
@@ -363,6 +372,9 @@ export type SyncStatus = {
   // and what stayed on the runner. withheld: its command or file can hold secrets.
   // unsent: given up on (too big, over a key's budget, or the check failed).
   full?: { bodies: number; bytes: number; withheld: number; unsent: number; pending: number; backendTooOld?: boolean };
+  // Roughly how much of a Free plan this runner uses (convex-use.ts), with a
+  // warning near its limits unless runner.json's sync.usageWarning is false.
+  use?: ConvexUse;
   // The phone's commands: whether the runner is listening for them, how
   // many it has applied since start, and the last one that failed.
   commands?: { state: 'off' | 'on' | 'error'; applied: number; failed: number; lastError?: string };
@@ -453,7 +465,7 @@ export type PhoneAsk = { action: string; why?: string; reply?: string; options?:
 // A text message, or one line for a tool call (role "tool", since backend
 // API 2): what the phone and the website show of a thread.
 export type WokeByDoc = { kind: string; description: string };
-export type MessageDoc = { threadId: string; seq: number; role: 'user' | 'assistant' | 'tool'; text: string; origin?: string; toolKind?: string; summary?: true; plan?: true; planDecision?: 'go' | 'revise'; turn?: string; wokeBy?: WokeByDoc[]; buttons?: MessageButton[]; at: string; pagedAt?: number };
+export type MessageDoc = { threadId: string; seq: number; role: 'user' | 'assistant' | 'tool' | 'note'; text: string; origin?: string; toolKind?: string; summary?: true; plan?: true; planDecision?: 'go' | 'revise'; turn?: string; wokeBy?: WokeByDoc[]; buttons?: MessageButton[]; at: string; pagedAt?: number };
 // A reply button as a message row carries it (API 59): enough to draw it
 // and say where it goes, never its brief or message, which stay on the Mac.
 // target: the new thread's folder name, or the title of the thread it messages.
@@ -572,7 +584,20 @@ export type CommandHost = {
   send(threadId: string, text: string, images: ImageRef[], opts: { origin?: 'phone'; answers?: AskAnswer[] }): unknown;
   respondApproval(p: { threadId: string; approvalId: string; decision: ApprovalDecision; message?: string; answers?: Record<string, string>; remote?: boolean }): unknown;
   answerSecret(p: { threadId: string; approvalId: string; secret?: string; decline?: boolean }): unknown;
-  update(p: { threadId: string; title?: string; snoozedUntil?: string | null; archived?: boolean; verdict?: ArchiveVerdict; starred?: boolean }): unknown;
+  update(p: {
+    threadId: string;
+    title?: string;
+    snoozedUntil?: string | null;
+    archived?: boolean;
+    verdict?: ArchiveVerdict;
+    starred?: boolean;
+    // A login or model change from the main Mac (API 77).
+    accountId?: string;
+    model?: string | null;
+    carryOn?: boolean;
+    unconfine?: boolean;
+    byAgent?: boolean;
+  }): unknown;
   // Hibernate in Mike's words (threads.hibernateWhen): a `snooze: { said }` update from the main Mac.
   hibernateWhen?(p: { threadId: string; said: string }): unknown;
   // Seen up to the last event it has.
@@ -642,6 +667,8 @@ export type SyncDeps = {
   // For the sidebar table (thread-index.ts): telling the app about other
   // runners' threads, and the data dir their tokens are copied into.
   publish?: (n: Notification) => void;
+  // Counts what goes up, for the estimate of Convex use (convex-use.ts).
+  use?: ConvexUseTally;
   home?: string;
   // When the backend turns this runner's key down: a notice for the app,
   // the key on disk now (readSyncKey, so a new one from tb runner add is
@@ -1082,6 +1109,15 @@ export function toMessageDoc(threadId: string, e: PersistedEvent, scrub: (text: 
   // message.
   const turn = e.turnId ? { turn: e.turnId.slice(0, 8) } : {};
   if (e.type === 'tool.call') return { threadId, seq: e.seq, role: 'tool', text: toolLine(e, scrub), toolKind: e.kind, ...turn, at: e.ts };
+  // A login's note (the thread moved to another login, or waits for room),
+  // or an early Stop saving a message: without it a thread on the Pixel that changed login
+  // showed the limit's words on the Mac and then just carried on (13 Nov).
+  // The runner's own words, a line or two: a move to another provider
+  // also says which model takes over.
+  if (e.type === 'system.note') {
+    const text = e.login || e.savedMessage ? scrub(e.text).trim().slice(0, NOTE_CHARS) : '';
+    return text ? { threadId, seq: e.seq, role: 'note', text, ...turn, at: e.ts } : undefined;
+  }
   if (e.type === 'plan.proposed') {
     // The plan in full (up to PLAN_CHARS), scrubbed as a reply is, so the
     // phone can read what its Go ahead approves.
@@ -1282,6 +1318,13 @@ export class ConvexSync {
   // The newest message seq written per thread, so a start needn't ask.
   private heads = new Map<string, number>();
   private catchUpDue = false;
+  // Threads the release before kept to finish (a handover), with the head
+  // the file says the mirror had. That release's sync stopped when the
+  // handover began, and this one hears the thread only from when it
+  // connects, so what came in between went up nowhere; and the thread's
+  // live messages move its head past that gap. Once it's here, everything
+  // after this head goes up (catchUpArrived); twice is harmless.
+  private arrivedFrom = new Map<string, number>();
   // Removals on their way (flush took them from `removed`), for saving, and
   // ones from the file, which a thread turning up here after all cancels.
   private removing = new Set<string>();
@@ -1290,6 +1333,7 @@ export class ConvexSync {
   private cacheTimer?: TimerHandle;
   private cacheChanged = false;
   private backendHeard = false;
+  private startupHeartbeatRetryMs = 1000;
   private settling = false;
   private settleTimer?: TimerHandle;
   // Rows on their way, by digest: a row marked meanwhile is compared with what
@@ -1313,6 +1357,12 @@ export class ConvexSync {
   private missing = new Map<string, number>();
   private missingTimer?: TimerHandle;
   private messages: MessageDoc[] = [];
+  // Login notes a backend from before API 78 (or one not heard from yet)
+  // couldn't take, newest HELD_NOTES, sent once it can. In memory only: the
+  // backend is deployed before the runner, so this is the moment before a
+  // start's first heartbeat, and a note lost to a restart in a longer gap
+  // than that is one line saying a login changed.
+  private heldNotes: MessageDoc[] = [];
   private woke = new WokeRows();
   // "<threadId> <buttonId>" -> the row that links it, as last sent, so a press
   // sends that row again with the new state (onButton). Newest kept.
@@ -1321,6 +1371,14 @@ export class ConvexSync {
   // The row has room for one card, the newest. Subagents' can be open
   // together and for a long time, so the rest wait here for it to close.
   private cardsBehind = new Map<string, PendingApproval[]>();
+  // Cards answered since this runner started (closeCard), newest last.
+  private closedCards = new Set<string>();
+  // Threads whose card changed since their row was last marked: the next
+  // mark goes through even while settling, as a card is what Mike acts on
+  // and a draining thread isn't looked at again when the settle ends.
+  private cardChanged = new Set<string>();
+  // start({ hold }) till release(): see release.
+  private holding = false;
   private earliest = new Map<string, number | null>(); // threadId -> seq of its first text message (null: none yet)
   private nexts = new Map<string, { lastSeq: number; next?: string[]; review?: LabReviewLedger; turn?: string }>(); // threadId -> its last turn's next steps, review and turn, as of lastSeq
   private lists: { projects?: Project[]; schedules?: Schedule[]; accounts?: Account[] } = {};
@@ -1400,6 +1458,20 @@ export class ConvexSync {
   // Commands.
   private unsubCommands?: () => void;
   private inFlight = new Set<string>();
+  // A command whose take failed before the backend answered (an outage, or
+  // .env files still being read), tried again with the next heartbeat: the
+  // pending list doesn't change by itself, so nothing else brings it round.
+  private untaken = new Map<string, Command>();
+  // Each thread's command being applied, so the next one for that thread
+  // waits for it: every update of the pending list starts its own run of
+  // takeCommands, and a text sent after a photo reached the agent first
+  // while the photo downloaded (13 Nov 2026, the implicit state machines
+  // scan). Other threads' commands don't wait.
+  private applying = new Map<string, Promise<unknown>>();
+  // A command applied here whose finishCommand failed, tried again with
+  // each heartbeat: otherwise it stays "taken", which nothing reaps for 14
+  // days, and the phone shows "Sending…" with no Cancel all that time.
+  private unfinished = new Map<string, { args: Record<string, unknown>; tries: number }>();
   private applied = 0;
   private failed = 0;
   private commandError?: string;
@@ -1438,7 +1510,15 @@ export class ConvexSync {
     // included, goes through here, so no field can be forgotten. Digests of what
     // was sent are of the row before this, so a rule or a value changing never
     // makes a row look new, and a start doesn't write everything again.
-    const send = deps.post ?? (url ? convexPoster(url) : async () => undefined);
+    const post = deps.post ?? (url ? convexPoster(url) : async () => undefined);
+    // Every mutation's size, for tb status's estimate of Convex use against
+    // the Free plan (convex-use.ts): a runner can't read its team's usage.
+    // Counted once it's taken: a failed try and its retry aren't twice the use.
+    const send: typeof post = async (kind, fn, args) => {
+      const out = await post(kind, fn, args);
+      if (kind === 'mutation' && deps.use) deps.use.record(Buffer.byteLength(JSON.stringify(args)), fn === 'sync:appendBodies');
+      return out;
+    };
     this.post = async (kind, fn, args) => {
       if (kind !== 'mutation') return send(kind, fn, args);
       // A command for another runner, like one from the phone: that runner has
@@ -1520,10 +1600,11 @@ export class ConvexSync {
     }
   }
 
-  start(): void {
+  start(opts: { hold?: boolean } = {}): void {
     if (this.off || !this.deps.config.full) this.forgetBodiesNote();
     if (this.off || this.running) return;
     this.running = true;
+    this.holding = opts.hold === true;
     this.projectsSent = undefined;
     this.accountsSent = undefined;
     this.full = true;
@@ -1566,6 +1647,7 @@ export class ConvexSync {
   async stop(opts: { bye?: boolean } = {}): Promise<void> {
     if (!this.running) return;
     this.running = false;
+    this.deps.use?.save();
     this.unsub?.();
     this.unsubCommands?.();
     this.unsubCommands = undefined;
@@ -1613,6 +1695,14 @@ export class ConvexSync {
       this.deps.log.warn('the convex backend is older than this runner', { backend: v, expected: BACKEND_API_VERSION, url: this.deps.config.url });
     }
     if (v >= INDEX_STARTED_BY_API_VERSION) this.index?.refresh();
+    if (v >= LOGIN_NOTES_API_VERSION && this.heldNotes.length) {
+      // Not one whose thread has gone since, or whose place in it an edit
+      // cut away: the owner's key would put a row back for it.
+      const live = new Set(this.deps.runner.list(ALL).map((t) => t.id));
+      const kept = this.heldNotes.splice(0).filter((m) => live.has(m.threadId) && !(this.deps.runner.cuts?.(m.threadId) ?? []).some((c) => m.seq >= c.from && m.seq <= c.to));
+      this.messages.push(...kept);
+      if (kept.length && this.running) this.scheduleFlush();
+    }
     // Only a runner key's were dropped; the owner's always stayed.
     if (v >= ARCHIVED_INDEX_API_VERSION && this.deps.key?.startsWith('tbr_')) this.index?.resendArchived();
     // Shared threads held back their share from an older backend (or
@@ -1664,6 +1754,12 @@ export class ConvexSync {
     if (held) s.schedulesHeld = held;
     if (this.deps.config.full) {
       s.full = { ...this.bodyStats, pending: this.bodies.length, ...((this.backendApiVersion ?? 0) < BODIES_API_VERSION && this.backendApiVersion !== undefined ? { backendTooOld: true } : {}) };
+    }
+    if (this.deps.use) {
+      const use = this.deps.use.use();
+      // Free's limits are Convex cloud's; a self-hosted backend has none.
+      if (this.deps.config.usageWarning === false || !isConvexCloud(this.deps.config.url)) delete use.warning;
+      s.use = use;
     }
     s.scrub = { ...this.scrubber.status(), ...(this.backendApiVersion !== undefined ? { backendChecks: this.backendApiVersion >= SCRUB_API_VERSION } : {}) };
     return s;
@@ -2144,6 +2240,7 @@ export class ConvexSync {
         this.held.delete(id);
         this.lastWrite.delete(id);
         this.heads.delete(id);
+        this.arrivedFrom.delete(id);
         this.noteSent();
         this.forgetCards(id);
         this.earliest.delete(id);
@@ -2258,6 +2355,21 @@ export class ConvexSync {
       this.scheduleFlush();
       return;
     }
+    if (!this.noteCard(threadId, e)) return;
+    try {
+      this.mark(this.deps.runner.get(threadId));
+      this.scheduleFlush();
+    } catch {
+      // Still on the release that handed over: its thread.updated comes
+      // after this event and marks the row then (cardChanged), as what it
+      // last said may be from before (idle, which would forget the card).
+      // Or gone between the event and now, when its row goes with it.
+    }
+  }
+
+  // A card the thread now waits on, or one that's been answered, onto what
+  // its row shows. False for an event that's neither.
+  private noteCard(threadId: string, e: PersistedEvent): boolean {
     if (e.type === 'approval.requested' && e.name === START_CARD) {
       // A request for a thread on another runner (cross-runner.ts) is
       // answered only on the main Mac, whose runner starts it: the phone's
@@ -2286,24 +2398,63 @@ export class ConvexSync {
     } else if (e.type === 'secret.requested') {
       // forBackend drops it for a backend older than SECRETS_API_VERSION.
       const box = this.deps.secretBox;
-      if (!box) return;
+      if (!box) return false;
       let key: string;
       try {
         key = box.publicKey();
       } catch (err) {
         this.deps.log.warn('no key for secrets from the phone', { error: String(err) });
-        return;
+        return false;
       }
       this.addCard(threadId, { approvalId: e.approvalId, kind: 'secret', seq: e.seq, label: e.label, reason: e.reason, ...(e.placeholder ? { placeholder: e.placeholder } : {}), key });
     } else if (e.type === 'approval.resolved') {
       this.closeCard(threadId, e.approvalId);
-    } else return;
-    try {
-      this.mark(this.deps.runner.get(threadId));
-      this.scheduleFlush();
-    } catch {
-      // The thread went between the event and now; its row goes with it.
+    } else return false;
+    this.cardChanged.add(threadId);
+    return true;
+  }
+
+  // The cards still open on a draining runner's threads after a handover
+  // (handover.ts, Peers.openCards), read while this sync listened but held
+  // its writes (start's hold). Their requests came before this runner was
+  // listening, so without this its first write of each row leaves the card
+  // off: the thread sits in the inbox needing Mike, and the phone and the
+  // main Mac have nothing to answer (13 Nov, a cloud runner's request to
+  // start a thread on the main Mac). A card already here from the live
+  // events, or answered since, is left as it is. Every thread read is
+  // marked, with what the draining runner says of it now, so a row still
+  // showing a card answered before the handover loses it.
+  seedCards(found: { thread: ThreadSummary; events: PersistedEvent[] }[]): void {
+    for (const { thread, events } of found) {
+      // One a draining runner answered in a shape not known here is skipped,
+      // not the rest with it (Daybreak 122).
+      if (!Array.isArray(events)) continue;
+      let added = false;
+      for (const e of [...events].sort((a, b) => a.seq - b.seq)) {
+        if (e.type === 'approval.resolved' || !('approvalId' in e)) continue;
+        const shown = [this.pending.get(thread.id), ...(this.cardsBehind.get(thread.id) ?? [])].some((c) => c?.approvalId === e.approvalId);
+        if (!shown && !this.closedCards.has(e.approvalId)) added = this.noteCard(thread.id, e) || added;
+      }
+      // Older than one that came live meanwhile: behind it, as if they'd
+      // all come live (the newest on the row, the rest in order behind).
+      if (added) {
+        const all = [...(this.cardsBehind.get(thread.id) ?? []), this.pending.get(thread.id)].filter((c): c is PendingApproval => c !== undefined).sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+        this.pending.set(thread.id, all.pop()!);
+        if (all.length) this.cardsBehind.set(thread.id, all);
+        else this.cardsBehind.delete(thread.id);
+      }
+      this.cardChanged.add(thread.id);
+      this.mark(thread);
     }
+    this.scheduleFlush();
+  }
+
+  // While a handover's cards are read (main.ts): listening, but nothing
+  // written, so no row goes up without its card first.
+  release(): void {
+    if (!this.holding) return;
+    this.holding = false;
+    this.scheduleFlush();
   }
 
   private addCard(threadId: string, card: PendingApproval): void {
@@ -2321,6 +2472,10 @@ export class ConvexSync {
   }
 
   private closeCard(threadId: string, approvalId: string): void {
+    // For seedCards: one answered while a handover read the draining
+    // runner's log mustn't come back open. A few hundred at most.
+    this.closedCards.add(approvalId);
+    if (this.closedCards.size > 500) this.closedCards.delete(this.closedCards.values().next().value!);
     const behind = (this.cardsBehind.get(threadId) ?? []).filter((c) => c.approvalId !== approvalId);
     if (this.pending.get(threadId)?.approvalId === approvalId) {
       const next = behind.pop();
@@ -2347,6 +2502,7 @@ export class ConvexSync {
   }
 
   private mark(t: ThreadSummary, now_ = false): void {
+    if (this.cardChanged.delete(t.id)) now_ = true;
     this.missing.delete(t.id);
     if (this.removedFromFile.delete(t.id)) {
       this.removed.delete(t.id);
@@ -2553,6 +2709,10 @@ export class ConvexSync {
     this.heads = new Map(Object.entries(c.heads));
     // One that's here after all (handed back) isn't gone.
     const here = new Set(this.deps.runner.list(ALL).map((t) => t.id));
+    // Peers connect before the sync starts (main.ts), so the kept ones are
+    // known by now.
+    this.arrivedFrom.clear();
+    for (const [id, seq] of this.heads) if (!here.has(id) && this.deps.elsewhere?.(id)) this.arrivedFrom.set(id, seq);
     for (const id of c.removed ?? []) {
       if (here.has(id)) continue;
       this.removed.add(id);
@@ -2586,6 +2746,7 @@ export class ConvexSync {
     this.cacheChanged = false;
     this.sent.clear();
     this.heads.clear();
+    this.arrivedFrom.clear();
     this.lastWrite.clear();
     this.projectsSent = undefined;
     this.accountsSent = undefined;
@@ -2623,7 +2784,10 @@ export class ConvexSync {
         ...(this.backendApiVersion !== undefined ? { apiVersion: this.backendApiVersion } : {}),
         at: this.fullAt,
         threads: Object.fromEntries(this.sent),
-        heads: Object.fromEntries(this.heads),
+        // A thread still to come across keeps the head from before the
+        // handover's gap, or a restart before it came would lose the gap
+        // (Codex's review): its live messages since go again with it.
+        heads: Object.fromEntries([...this.heads].map(([id, seq]) => [id, Math.min(seq, this.arrivedFrom.get(id) ?? seq)])),
         ...(this.removed.size || this.removing.size ? { removed: [...new Set([...this.removed, ...this.removing])] } : {}),
         ...(this.projectsSent ? { projects: Object.fromEntries(this.projectsSent) } : {}),
         ...(this.accountsSent ? { accounts: Object.fromEntries(this.accountsSent) } : {}),
@@ -2923,7 +3087,7 @@ export class ConvexSync {
   }
 
   private scheduleFlush(): void {
-    if (!this.running || this.flushTimer) return;
+    if (!this.running || this.flushTimer || this.holding) return;
     // Project pictures waiting (picturesDue) count too: one an upload
     // allowance held back goes once its pause is over, idle or not.
     const picturesWaiting = this.picturesDue && (this.backendApiVersion ?? 0) >= ICONS_API_VERSION && !this.picturesPaused();
@@ -3041,6 +3205,8 @@ export class ConvexSync {
         messages.unshift(...this.catchUpFromHeads());
         this.catchUpDue = false;
       }
+      const arrived = this.arrivedFrom.size ? this.catchUpArrived() : { docs: [], ids: [] };
+      messages.unshift(...arrived.docs);
       // What it finds is written with the next flush (scheduleFlush, below).
       if (this.sharesCheckDue()) await this.reconcileShares(key);
       this.historiesDue = false;
@@ -3061,6 +3227,9 @@ export class ConvexSync {
         return true;
       });
       const notFilled = await this.appendMessages(messages);
+      // Their gap is up: until now a failed write (and a restart before the
+      // retry) still needed the head from before it (Codex's review).
+      for (const id of arrived.ids) if (!notFilled.has(id)) this.arrivedFrom.delete(id);
       this.markFilled(filling.filter((id) => !notFilled.has(id)));
       // A message left out of a closed id: its whole history goes again once
       // it opens (histories()), as messages after it may have gone up, and
@@ -3418,6 +3587,19 @@ export class ConvexSync {
     // the runner, so this only matters when that deploy was skipped.
     const v = this.backendApiVersion;
     let messages = v !== undefined && v < 2 ? all.filter((m) => m.role !== 'tool') : all;
+    // Nor a login's note before API 78: the validator refuses the role, and
+    // the whole batch with it.
+    // Kept for when it does (sawBackend): the rows after it go up meanwhile
+    // and take the thread's head past it, so nothing else would send it
+    // again (Codex's review, 13 Nov).
+    if (v === undefined || v < LOGIN_NOTES_API_VERSION) {
+      const notes = messages.filter((m) => m.role === 'note');
+      if (notes.length) {
+        this.heldNotes.push(...notes);
+        if (this.heldNotes.length > HELD_NOTES) this.heldNotes.splice(0, this.heldNotes.length - HELD_NOTES);
+        messages = messages.filter((m) => m.role !== 'note');
+      }
+    }
     // Before API 14 the validator has no `summary`; the bullets go as text.
     if (v === undefined || v < ASKS_API_VERSION) messages = messages.map((m) => (m.summary ? (({ summary, ...rest }) => rest)(m) : m));
     if (v === undefined || v < TURNS_API_VERSION) messages = messages.map((m) => (m.turn ? (({ turn, ...rest }) => rest)(m) : m));
@@ -3473,6 +3655,39 @@ export class ConvexSync {
       if (filled.has(t.id)) out.push(...this.messagesAfter(t, this.heads.get(t.id) ?? 0));
     }
     return out;
+  }
+
+  // The kept threads (arrivedFrom) that have come across since: what's
+  // after the head the release before left, and which threads that's for
+  // (forgotten by flush once it's written). One still on that release
+  // waits; one gone from both (deleted there) is forgotten.
+  private catchUpArrived(): { docs: MessageDoc[]; ids: string[] } {
+    const filled = this.filledThreads();
+    const docs: MessageDoc[] = [];
+    const ids: string[] = [];
+    for (const [id, from] of [...this.arrivedFrom]) {
+      if (this.deps.elsewhere?.(id)) continue;
+      let t: ThreadSummary;
+      try {
+        t = this.deps.runner.get(id);
+      } catch {
+        this.arrivedFrom.delete(id);
+        continue;
+      }
+      // One whose whole history isn't up yet is histories()' job.
+      if (!filled.has(id)) {
+        this.arrivedFrom.delete(id);
+        continue;
+      }
+      // A log that can't be read whole now is tried again with the next
+      // flush: what part of it came back mustn't retire the head (Codex's
+      // review).
+      const got = this.messagesAfter(t, from, true);
+      if (!got) continue;
+      docs.push(...got);
+      ids.push(id);
+    }
+    return { docs, ids };
   }
 
   // Each thread's whole history goes up once per deployment (text and tool
@@ -3671,12 +3886,12 @@ export class ConvexSync {
       draining: false,
       threadCount: this.deps.runner.list(ALL).length,
       ...(this.deps.config.icon && (this.backendApiVersion ?? 0) >= RUNNER_ICON_API_VERSION ? { icon: this.deps.config.icon } : {}),
-      ...(this.deps.config.rpcUrl && (this.backendApiVersion ?? 0) >= THREAD_INDEX_API_VERSION ? { rpcUrl: this.deps.config.rpcUrl } : {}),
       ...(this.stats?.pressure && (this.backendApiVersion ?? 0) >= RUNNER_STATS_API_VERSION ? { pressure: this.stats.pressure } : {}),
       ...followProblem,
     };
     void this.post('mutation', 'sync:heartbeat', { key: this.deps.key, runner }).then(
       (r) => {
+        if (!this.backendHeard && this.startupHeartbeatRetryMs > 1000) this.deps.log.info('convex startup heartbeat recovered');
         this.sawBackend(r);
         // A start whose first flush went before a heartbeat said the
         // backend can list the shared rows checks them now.
@@ -3686,6 +3901,7 @@ export class ConvexSync {
         this.pushOff = (r as { pushOff?: unknown } | null)?.pushOff === true;
         this.notePushFailing(asPushFailing((r as { pushFailing?: unknown } | null)?.pushFailing));
         this.lookForReplyImages();
+        this.retryCommands();
         if ((this.backendApiVersion ?? 0) >= SCHEDULES_API_VERSION && this.running) void this.deps.schedules?.attach(this.scheduleBackend());
         if ((this.backendApiVersion ?? 0) >= SHARED_POOLS_API_VERSION && this.running) this.deps.pools?.attach(this.poolBackend());
         if ((this.backendApiVersion ?? 0) >= SHARED_USAGE_API_VERSION && this.running) this.followSharedUsage();
@@ -3710,6 +3926,15 @@ export class ConvexSync {
         // Only that: while a network blip lasted, this would leave `turn` and
         // the like off message rows, and they're never written again.
         if (!this.backendHeard && /validat/i.test(String(e))) this.backendApiVersion = undefined;
+        // Schedules and the other runners' index wait for this handshake.
+        // A single failed request at startup used to leave them unavailable
+        // for a whole minute, even after the connection had recovered.
+        if (this.running && !this.backendHeard && !this.keyRejected && !refused && !refusedForGood(e) && !retryLater(e)) {
+          if (this.startupHeartbeatRetryMs === 1000) this.deps.log.info('convex startup heartbeat failed; retrying', { error: String(e) });
+          this.heartbeatTimer?.cancel();
+          this.heartbeatTimer = this.deps.clock.setTimeout(() => this.heartbeat(), this.startupHeartbeatRetryMs);
+          this.startupHeartbeatRetryMs = Math.min(this.startupHeartbeatRetryMs * 2, HEARTBEAT_MS);
+        }
       },
     );
     if (this.deps.clock.now() - this.sharesCheckedAt >= SHARE_RECONCILE_MS && !this.sharesDue) {
@@ -3837,7 +4062,10 @@ export class ConvexSync {
 
   /** Whether remoteThreads has heard from the backend (ThreadIndex.heard); true with sync off, as there's nothing to wait for. */
   remoteHeard(): boolean {
-    return this.index?.heard() ?? true;
+    if (!this.running) return true;
+    if (!this.backendHeard) return false;
+    if ((this.backendApiVersion ?? 0) < THREAD_INDEX_API_VERSION) return true;
+    return this.index?.heard() ?? false;
   }
 
   /** Runners online now that say they aren't following GitHub's main properly. */
@@ -3847,7 +4075,8 @@ export class ConvexSync {
 
   /** remoteThreads.list: other runners' threads, empty with sync off. */
   remoteThreads(): RemoteThreads {
-    return this.index?.list() ?? { runners: [], threads: [] };
+    const list = this.index?.list() ?? { runners: [], threads: [] };
+    return { ...list, ready: this.remoteHeard() };
   }
 
   // ------------------------------------------------------------ schedules
@@ -4016,38 +4245,108 @@ export class ConvexSync {
   // Each pending command once: takeCommand says no if another runner (or
   // an earlier update of the same list) already has it.
   private async takeCommands(commands: Command[]): Promise<void> {
+    const runs: Promise<void>[] = [];
     for (const c of commands) {
       if (!this.running || this.inFlight.has(c.commandId)) continue;
       this.inFlight.add(c.commandId);
-      try {
-        const taken = await this.post('mutation', 'sync:takeCommand', { key: this.deps.key, commandId: c.commandId });
-        if (taken !== true) continue;
-        let resultThreadId: string | undefined;
-        let result: unknown;
-        let note: string | undefined;
-        let ok = true;
-        try {
-          ({ threadId: resultThreadId, result } = (await this.apply(c)) ?? {});
-          this.applied++;
-        } catch (e) {
-          ok = false;
-          note = String((e as Error)?.message ?? e);
-          this.failed++;
-          this.commandError = note;
-          // The phone can still show a thread for a moment after it's
-          // deleted: its command failing then is a race, not a problem.
-          if ((e as { code?: unknown })?.code === ErrorCode.threadNotFound) this.deps.log.info('phone command for a thread that has gone', { kind: c.kind, threadId: c.threadId });
-          else this.deps.log.warn('phone command failed', { kind: c.kind, threadId: c.threadId, error: note });
-        }
-        if (resultThreadId) await this.writeRowNow(resultThreadId);
-        await this.post('mutation', 'sync:finishCommand', { key: this.deps.key, commandId: c.commandId, ok, ...(note ? { note } : {}), ...(resultThreadId ? { resultThreadId } : {}), ...(result !== undefined ? { result: JSON.stringify(result) } : {}) });
-      } catch (e) {
-        // Couldn't take or finish it: the next update of the list brings
-        // it round again if it's still pending.
-        this.deps.log.debug('phone command not taken', { commandId: c.commandId, error: String(e) });
-      } finally {
-        this.inFlight.delete(c.commandId);
+      // Its place in its thread's line is kept from here, before the take:
+      // a slow answer to an earlier command's take let a later one for the
+      // same thread go first (Codex's review). Other threads' don't wait.
+      runs.push(this.inOrder(c.threadId ?? '', () => this.takeAndRun(c)).finally(() => this.inFlight.delete(c.commandId)));
+    }
+    await Promise.all(runs);
+  }
+
+  private async takeAndRun(c: Command): Promise<void> {
+    if (!this.running) return;
+    // An earlier command for this thread whose take failed goes again with
+    // the next heartbeat: this one waits to go after it (Codex's review).
+    if (c.threadId && [...this.untaken.values()].some((u) => u.threadId === c.threadId && u.commandId !== c.commandId && u.createdAt < c.createdAt)) {
+      this.untaken.set(c.commandId, c);
+      return;
+    }
+    let taken: unknown;
+    try {
+      taken = await this.post('mutation', 'sync:takeCommand', { key: this.deps.key, commandId: c.commandId });
+      this.untaken.delete(c.commandId);
+    } catch (e) {
+      // Still pending: the next heartbeat tries it again.
+      if (!refusedForGood(e)) this.untaken.set(c.commandId, c);
+      this.deps.log.debug('phone command not taken', { commandId: c.commandId, error: String(e) });
+      return;
+    }
+    if (taken === true) await this.runTaken(c);
+  }
+
+  private async runTaken(c: Command): Promise<void> {
+    let resultThreadId: string | undefined;
+    let result: unknown;
+    let note: string | undefined;
+    let ok = true;
+    try {
+      ({ threadId: resultThreadId, result } = (await this.apply(c)) ?? {});
+      this.applied++;
+    } catch (e) {
+      ok = false;
+      note = String((e as Error)?.message ?? e);
+      this.failed++;
+      this.commandError = note;
+      // The phone can still show a thread for a moment after it's
+      // deleted: its command failing then is a race, not a problem.
+      if ((e as { code?: unknown })?.code === ErrorCode.threadNotFound) this.deps.log.info('phone command for a thread that has gone', { kind: c.kind, threadId: c.threadId });
+      else this.deps.log.warn('phone command failed', { kind: c.kind, threadId: c.threadId, error: note });
+    }
+    // The row first, so the phone opens a thread it already has; one
+    // that can't be written now goes with the next flush, and the
+    // command is finished either way.
+    if (resultThreadId) await this.writeRowNow(resultThreadId).catch((e) => this.deps.log.debug('could not write the row of a command thread yet', { threadId: resultThreadId, error: String(e) }));
+    await this.finishCommand(c.commandId, { key: this.deps.key, commandId: c.commandId, ok, ...(note ? { note } : {}), ...(resultThreadId ? { resultThreadId } : {}), ...(result !== undefined ? { result: JSON.stringify(result) } : {}) });
+  }
+
+  // A thread's commands run one after another, in the order they were
+  // taken; ones for no thread (a new thread, a schedule) likewise among
+  // themselves.
+  private inOrder(id: string, work: () => Promise<void>): Promise<void> {
+    const before = this.applying.get(id);
+    const run = (before ? before.catch(() => undefined) : Promise.resolve()).then(work);
+    this.applying.set(id, run);
+    void run
+      .catch(() => undefined)
+      .finally(() => {
+        if (this.applying.get(id) === run) this.applying.delete(id);
+      });
+    return run;
+  }
+
+  private async finishCommand(commandId: string, args: Record<string, unknown>): Promise<void> {
+    try {
+      await this.post('mutation', 'sync:finishCommand', args);
+      this.unfinished.delete(commandId);
+    } catch (e) {
+      const tries = (this.unfinished.get(commandId)?.tries ?? 0) + 1;
+      // A refusal won't change, and after an hour of heartbeats the backend
+      // is long past caring (the phone has given up on it too).
+      if (refusedForGood(e) || tries > FINISH_TRIES) {
+        this.unfinished.delete(commandId);
+        this.deps.log.warn('could not say how a phone command went', { commandId, tries, error: String(e) });
+      } else {
+        this.unfinished.set(commandId, { args, tries });
+        this.deps.log.debug('could not say how a phone command went yet', { commandId, tries, error: String(e) });
       }
+    }
+  }
+
+  // With each heartbeat that got through: the backend is answering again.
+  private retryCommands(): void {
+    for (const [commandId, { args }] of [...this.unfinished]) {
+      if (this.inFlight.has(commandId)) continue;
+      this.inFlight.add(commandId);
+      void this.finishCommand(commandId, args).finally(() => this.inFlight.delete(commandId));
+    }
+    if (this.untaken.size && this.deps.commands) {
+      const again = [...this.untaken.values()].sort((a, b) => a.createdAt - b.createdAt);
+      this.untaken.clear();
+      void this.takeCommands(again);
     }
   }
 
@@ -4176,7 +4475,28 @@ export class ConvexSync {
         else if (a.markSeen) await host.markSeen(id);
         else if (typeof a.star === 'boolean') await host.update({ threadId: id, starred: a.star });
         else if (typeof a.title === 'string') await host.update({ threadId: id, title: a.title });
-        else throw new Error('nothing to change');
+        else if (typeof a.accountId === 'string' || a.model !== undefined) {
+          // The main Mac's login or model pickers, or its limit box's
+          // Continue now on (API 77), only ever from the main Mac:
+          // convex/relay.ts queues it, the phone has no way to. Mike's own
+          // pick may take a sandboxed thread out of its sandbox, as the
+          // app's does here; an agent's (by: "agent") may not, and starts
+          // no turn by itself.
+          if (a.from !== 'mac') throw new Error('Only the main Mac changes a login from another device.');
+          const byAgent = a.by === 'agent';
+          const done = (await host.update({
+            threadId: id,
+            ...(typeof a.accountId === 'string' ? { accountId: a.accountId } : {}),
+            ...(a.model === null || typeof a.model === 'string' ? { model: a.model } : {}),
+            ...(a.carryOn === true && typeof a.accountId === 'string' ? { carryOn: true } : {}),
+            unconfine: !byAgent,
+            ...(byAgent ? { byAgent: true } : {}),
+          })) as { thread?: { accountId?: unknown; model?: unknown } } | undefined;
+          // What it became, which the Mac shows: this runner may have put
+          // its own default in place of a model its login can't run.
+          const t = done?.thread;
+          return { result: { ...(typeof t?.accountId === 'string' ? { accountId: t.accountId } : {}), model: typeof t?.model === 'string' ? t.model : null } };
+        } else throw new Error('nothing to change');
         return undefined;
       }
       case 'create': {
@@ -4265,7 +4585,7 @@ export class ConvexSync {
         const page = events
           .filter((e) => !cuts.some((c) => e.seq >= c.from && e.seq <= c.to))
           .map((e) => toMessageDoc(id, e, this.scrubber.safeText))
-          .filter((m): m is MessageDoc => Boolean(m) && m!.role !== 'tool')
+          .filter((m): m is MessageDoc => Boolean(m) && m!.role !== 'tool' && m!.role !== 'note')
           .slice(-PAGE_SIZE)
           .map((m) => ({ ...m, pagedAt: now }));
         await this.appendMessages(page);
@@ -4310,5 +4630,14 @@ export class ConvexSync {
       default:
         throw new Error(`unknown command ${c.kind}`);
     }
+  }
+}
+
+// A deployment on Convex cloud, whose plans have the Free limits convex-use.ts warns about.
+export function isConvexCloud(url: string | undefined): boolean {
+  try {
+    return url !== undefined && /\.convex\.cloud$/.test(new URL(url).hostname);
+  } catch {
+    return false;
   }
 }

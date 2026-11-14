@@ -19,11 +19,12 @@
 // thread he had open: straight away while Mike's in another app, and with the
 // app in front once he hasn't touched it for five seconds.
 //
-// No handover here (the Swift app's Handover.swift starts the new build under
-// the old window, so the window never goes): a restart in front is the window
-// going and coming back. The Swift app only restarts in front when that would
-// go unseen, but Mike keeps this app in front, so its updates never went in
-// until he clicked (12 Nov); he'd rather it went in by itself.
+// With the window on screen, the restart is a handover (handover.rs, as the
+// Swift app's Handover.swift): the new build starts under the old window and
+// takes its place once it's drawn, so the window never goes, and each
+// thread's scroll place comes with it (`restore_state`). Mike keeps this app
+// in front, so its updates never went in until he clicked (12 Nov); he'd
+// rather it went in by itself, and with the handover it goes unseen.
 use crate::app::Threadbear;
 use crate::installed;
 use gpui_kit::*;
@@ -63,6 +64,15 @@ pub(crate) struct AppUpdater {
     /// it's the installed app.
     pub(crate) disabled: Option<String>,
     restarting: bool,
+    /// The restart under way is one the app chose by itself, not Restart to
+    /// Update: a handover's go waits for what that would have waited for.
+    pub(crate) auto_restart: bool,
+    /// What the staged build's restart waits on, as the Updates panel says
+    /// it, set at each once-a-second look (`consider_auto_restart`).
+    pub(crate) wait: Option<rules::RestartWait>,
+    /// The same hold since when, and whether the log has it: one that lasts
+    /// a minute goes in the log once, so a restart that never came says why.
+    held_since: Option<(String, std::time::Instant, bool)>,
     build_pid: Option<u32>,
     soon: Option<Task<()>>,
     watch: Option<crate::file_watch::FolderWatch>,
@@ -188,12 +198,7 @@ fn relaunch_after_exit(bundle: &Path, in_background: bool) {
     if in_background {
         open.push("-g".into());
     }
-    let mut settings: Vec<(String, std::ffi::OsString)> = std::env::vars_os()
-        .filter_map(|(key, value)| Some((key.into_string().ok()?, value)))
-        .filter(|(key, _)| (key.starts_with("THREADBEAR_") || key.starts_with("THREADBARE_")) && !["_THREAD_ID", "_THREAD_KEY", "_AUTOMATION"].iter().any(|s| key.ends_with(s)))
-        .collect();
-    settings.sort();
-    for (key, value) in settings {
+    for (key, value) in settings_to_pass_on() {
         let mut pair = std::ffi::OsString::from(format!("{key}="));
         pair.push(value);
         open.extend(["--env".into(), pair]);
@@ -204,6 +209,23 @@ fn relaunch_after_exit(bundle: &Path, in_background: bool) {
     if let Err(e) = started {
         note(&format!("couldn't start the relaunch: {e}"));
     }
+}
+
+/// The Threadbear settings this run was given, for `open` to pass on to the
+/// next (`relaunch_after_exit`, and handover.rs's second copy).
+pub(crate) fn settings_to_pass_on() -> Vec<(String, std::ffi::OsString)> {
+    let mut settings: Vec<(String, std::ffi::OsString)> = std::env::vars_os()
+        .filter_map(|(key, value)| Some((key.into_string().ok()?, value)))
+        .filter(|(key, _)| (key.starts_with("THREADBEAR_") || key.starts_with("THREADBARE_")) && !["_THREAD_ID", "_THREAD_KEY", "_AUTOMATION"].iter().any(|s| key.ends_with(s)))
+        .collect();
+    settings.sort();
+    settings
+}
+
+/// The installed app opened again once this one has gone, in front: a
+/// handover whose new app went before taking over (handover.rs).
+pub(crate) fn relaunch_installed() {
+    relaunch_after_exit(&install_dir(), false);
 }
 
 /// The installed app's build, if it can follow main, or why it can't.
@@ -323,12 +345,12 @@ fn app_active() -> bool {
 /// Mac (the hang watch's own question), which with the app in front is input
 /// to it. Covers every window of the app, Settings and the review window too.
 #[cfg(target_os = "macos")]
-fn idle_seconds() -> f64 {
+pub(crate) fn idle_seconds() -> f64 {
     crate::hang_watch::idle_seconds().unwrap_or(0.)
 }
 
 #[cfg(windows)]
-fn idle_seconds() -> f64 {
+pub(crate) fn idle_seconds() -> f64 {
     #[repr(C)]
     struct LastInput { size: u32, tick: u32 }
     #[link(name = "user32")]
@@ -345,13 +367,18 @@ fn idle_seconds() -> f64 {
 /// On Linux there's no asking yet, so it never counts as idle: in front it
 /// waits for Restart to Update or for another app to be in front.
 #[cfg(not(any(target_os = "macos", windows)))]
-fn idle_seconds() -> f64 {
+pub(crate) fn idle_seconds() -> f64 {
     0.
 }
 
 impl Threadbear {
     /// From the app's start: only the installed app follows main.
     pub(crate) fn start_updater(&mut self, cx: &mut Context<Self>) {
+        // The incoming side of a handover starts it once it takes over: the
+        // app that's showing is the one following main.
+        if crate::handover::waiting() {
+            return;
+        }
         let info = match followable() {
             Ok(info) => info,
             Err(why) => {
@@ -376,17 +403,7 @@ impl Threadbear {
                 cx.background_executor().timer(LOOK_EVERY).await;
             }
         });
-        let main = self.main_window;
-        let restarts = cx.spawn(async move |this, cx| loop {
-            cx.background_executor().timer(RESTART_LOOK).await;
-            // The windows are looked at here, outside the app's own update:
-            // a window's dialogs and focus are read through its root, which
-            // reads the app back.
-            let windows = cx.update(|cx| windows_now(main, cx));
-            if this.update(cx, |t, cx| t.consider_auto_restart(windows, cx)).is_err() {
-                break;
-            }
-        });
+        let restarts = self.restart_looks(cx);
         self.updater.tasks = vec![looks, restarts];
         // A merge to main is built within seconds, not at the next look: its
         // ref is written in refs/heads, or packed into the git folder.
@@ -398,6 +415,21 @@ impl Threadbear {
             }
             self.updater.watch = watch;
         }
+    }
+
+    /// The once-a-second look at whether to restart into a staged build.
+    fn restart_looks(&self, cx: &mut Context<Self>) -> Task<()> {
+        let main = self.main_window;
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(RESTART_LOOK).await;
+            // The windows are looked at here, outside the app's own update:
+            // a window's dialogs and focus are read through its root, which
+            // reads the app back.
+            let windows = cx.update(|cx| windows_now(main, cx));
+            if this.update(cx, |t, cx| t.consider_auto_restart(windows, cx)).is_err() {
+                break;
+            }
+        })
     }
 
     /// Main moved: a look in a few seconds. A burst of ref writes (a merge,
@@ -534,7 +566,58 @@ impl Threadbear {
             || crate::tips::any_menu_up()
             || gpui_kit::base::GlobalState::is_in_deferred_context(cx)
             || self.share_popover.is_some()
+            || self.anything.is_some()
             || self.move_sheet.is_some()
+    }
+
+    /// What holds a restart, as the end of "It switches in once ...", for
+    /// the Updates panel and the log: the first of `has_unsent_words`,
+    /// `under_way` and the windows' that holds, with the thread whose
+    /// message box has words in it named, as that's the one he can't see.
+    fn restart_hold(&self, windows: WindowsNow, cx: &App) -> String {
+        let s = |text: &str| text.to_owned();
+        if let Some((id, _)) = self.composers.iter().find(|(_, c)| c.read(cx).holds_anything(cx)) {
+            return format!("the message box in “{}” is sent or cleared", self.thread_title(id));
+        }
+        if self.new_thread.composer.as_ref().is_some_and(|c| c.read(cx).holds_anything(cx)) {
+            return s("the new thread's message box is sent or cleared");
+        }
+        if self.schedule_editor.is_some() {
+            return s("the schedule you're editing is saved or closed");
+        }
+        if let Some(field) = crate::unsent::first(cx) {
+            return format!("what you're typing in {field} is sent, saved or cleared");
+        }
+        if crate::terminal::holds_a_restart(cx) {
+            return s("the Terminal's shell is back at an empty prompt");
+        }
+        if crate::web_panels::holds_a_restart(cx) {
+            return s("a panel's page has been left alone for a minute");
+        }
+        if cx.has_active_drag() || crate::reply_links::left_held() || self.swipe_nav.under_way() || self.sidebar.gestures.under_way() {
+            return s("the drag or swipe ends");
+        }
+        if windows.other_window_input {
+            return s("you've finished typing in the other window");
+        }
+        s("the open menu, popover or dialog is closed")
+    }
+
+    /// A hold that's lasted a minute goes in the update log, once.
+    fn note_long_hold(&mut self, wait: Option<&rules::RestartWait>) {
+        let Some(rules::RestartWait::Held(why)) = wait else {
+            self.updater.held_since = None;
+            return;
+        };
+        match &mut self.updater.held_since {
+            Some((was, since, noted)) if was == why => {
+                if !*noted && since.elapsed() >= Duration::from_secs(60) {
+                    *noted = true;
+                    note(&format!("the staged build waits until {why}"));
+                }
+            }
+            _ => self.updater.held_since = Some((why.clone(), std::time::Instant::now(), false)),
+        }
     }
 
     /// What a restart by itself is weighed against just now, with what the
@@ -559,13 +642,28 @@ impl Threadbear {
         // Looked at every second, staged or not, so a page used just before
         // a build is staged still counts as used lately.
         crate::web_panels::holds_a_restart(cx);
-        if self.updater.restarting || self.updater.staged.is_none() || self.updater.preview {
+        // A scripted app's made-up update (`preview`) says what it would
+        // wait on, for pictures and specs, but never restarts.
+        if self.updater.restarting || self.updater.staged.is_none() {
+            self.updater.held_since = None;
+            if self.updater.wait.take().is_some() {
+                cx.notify();
+            }
             return;
         }
         let moment = self.restart_moment(windows, cx);
-        if rules::should_auto_restart(&moment) {
+        let wait = rules::restart_wait(&moment, || self.restart_hold(windows, cx));
+        self.note_long_hold(wait.as_ref());
+        // Drawn again only when the line changes: once a second while it
+        // counts down, not at all while it's held or he's using the app.
+        if wait != self.updater.wait {
+            self.updater.wait = wait;
+            cx.notify();
+        }
+        if !self.updater.preview && rules::should_auto_restart(&moment) {
             note(if moment.active { "restarting into the staged build: nothing typed, and no input for five seconds" } else { "restarting into the staged build: nothing typed, and the app isn't in front" });
             // In front it comes back in front; behind, it stays behind.
+            self.updater.auto_restart = true;
             self.restart_for_update(!moment.active, cx);
         }
     }
@@ -581,13 +679,79 @@ impl Threadbear {
 
     fn restart_for_update(&mut self, in_background: bool, cx: &mut Context<Self>) {
         self.updater.restarting = true;
-        // Where it was, put back once the threads have loaded.
-        // And whether it was in front, so a restart made behind another app
-        // comes back behind it.
-        self.settings.saved.update_restore = Some(json!({ "mode": self.mode.name(), "selection": self.selected, "front": !in_background }));
+        // Where it was, put back once the threads have loaded: the list,
+        // the thread, where each thread was scrolled to, and whether it was
+        // in front, so a restart made behind another app comes back behind it.
+        self.settings.saved.update_restore = Some(self.restore_state(!in_background, cx));
         self.settings.save();
+        // Kept in memory too: the old way's quit saves the settings again.
+        // A handover drops it as it hands over (`leave_state_for_incoming`).
+        // Next tick, outside whatever's being drawn or dispatched, so the
+        // window can be asked where it is.
+        cx.spawn(async move |this, cx| {
+            this.update(cx, |t, cx| t.hand_over_or_relaunch(in_background, cx)).ok();
+        })
+        .detach();
+    }
+
+    /// With the window plainly on screen, the new build is swapped in now
+    /// and started beside this one, which quits once it's showing
+    /// (handover.rs), so the window never goes away. Otherwise, or if that
+    /// can't start, the old way: quit, and open the app again.
+    fn hand_over_or_relaunch(&mut self, in_background: bool, cx: &mut Context<Self>) {
+        let main = self.main_window;
+        let spot = main.update(cx, |_, window, _| crate::handover::outgoing_spot(window)).ok().flatten();
+        if let Some(spot) = spot {
+            if drop_untrusted_staged() {
+                match rules::apply_staged(&install_dir(), &next_dir(), &old_dir(), &swapping_note(), self.updater.running.as_ref()) {
+                    Ok(Some(staged)) => {
+                        note(&format!("swapped in {} to hand over to", staged.short));
+                        self.updater.staged = None;
+                        self.hand_over(install_dir(), spot, move |_, cx| {
+                            relaunch_after_exit(&install_dir(), in_background);
+                            cx.quit();
+                        }, cx);
+                        return;
+                    }
+                    Ok(None) => {}
+                    Err(e) => note(&e),
+                }
+            }
+        }
         relaunch_after_exit(&install_dir(), in_background);
         cx.quit();
+    }
+
+    /// Where each thread open in a pane is scrolled to now, the ones at
+    /// their end too.
+    pub(crate) fn live_scroll_memories(&self, cx: &App) -> Vec<(String, crate::rows::ScrollMemory)> {
+        self.threads
+            .keys()
+            .filter_map(|id| {
+                let pane = self.pane_for(id, cx)?;
+                let pane = pane.read(cx);
+                pane.is_loaded().then(|| (id.clone(), pane.capture_memory(cx)))
+            })
+            .collect()
+    }
+
+    /// Something a restart by itself would have waited for, started while a
+    /// handover's new copy loaded: it holds the go (handover.rs). Not words
+    /// in a message box, which go across in the drafts file, but a picture
+    /// still being copied into one, which doesn't; and nothing for a Restart
+    /// to Update he chose, which never waited for these.
+    pub(crate) fn handover_held(&self, windows: WindowsNow, cx: &App) -> bool {
+        let copying = self.composers.values().chain(self.new_thread.composer.iter()).any(|c| c.read(cx).copying_picture(cx));
+        self.updater.auto_restart && (windows.held || windows.other_window_input || copying || self.under_way(cx) || self.schedule_editor.is_some() || crate::unsent::any(cx))
+    }
+
+    /// What a restart leaves for the next launch: the list and the thread
+    /// showing, whether it was in front, and where each thread was scrolled
+    /// to (the open ones measured now; ones opened earlier as they were
+    /// left), so none of them jumps to its end.
+    pub(crate) fn restore_state(&self, front: bool, cx: &App) -> serde_json::Value {
+        let live = self.live_scroll_memories(cx);
+        json!({ "mode": self.mode.name(), "selection": self.selected, "front": front, "scroll": crate::rows::scroll_memories_json(&live) })
     }
 
     /// On quit: the staged bundle takes the installed one's place, so the
@@ -621,16 +785,28 @@ impl Threadbear {
     pub(crate) fn restore_after_update(&mut self, cx: &mut Context<Self>) {
         let Some(saved) = self.settings.saved.update_restore.take() else { return };
         self.save_settings_soon(cx);
-        let mode = match saved["mode"].as_str() {
-            Some("scheduled") => crate::shell::SidebarMode::Scheduled,
-            Some("projects") => crate::shell::SidebarMode::Projects,
-            Some("librarian") => crate::shell::SidebarMode::Librarian,
+        // Where each thread was scrolled to, before any of them opens: the
+        // pane looks there as it loads (`restore_memory`).
+        crate::rows::recall_scroll_memories(&saved["scroll"]);
+        self.restore_place(saved["mode"].as_str().unwrap_or("inbox"), saved["selection"].as_str().unwrap_or(""), cx);
+    }
+
+    /// Puts the list and the thread back. Only what differs is changed, so a
+    /// handover's "go" that matches what's showing does nothing.
+    pub(crate) fn restore_place(&mut self, mode: &str, selection: &str, cx: &mut Context<Self>) {
+        let mode = match mode {
+            "scheduled" => crate::shell::SidebarMode::Scheduled,
+            "projects" => crate::shell::SidebarMode::Projects,
+            "librarian" => crate::shell::SidebarMode::Librarian,
             _ => crate::shell::SidebarMode::Inbox,
         };
-        self.set_mode(mode, cx);
-        if let Some(id) = saved["selection"].as_str().filter(|s| !s.is_empty()) {
-            self.pending_restore = Some(id.to_owned());
-            // The list is in already (a script's restart): open it now.
+        if self.mode != mode {
+            self.set_mode(mode, cx);
+        }
+        if !selection.is_empty() && self.selected.as_deref() != Some(selection) {
+            self.pending_restore = Some(selection.to_owned());
+            // The list is in already (a script's restart, or a handover's
+            // "go"): open it now.
             if self.sidebar.loaded {
                 self.open_pending(cx);
             }
@@ -650,6 +826,7 @@ impl Threadbear {
             // not to. No builder is only ever set by an installed app's build
             // (or a scripted app's made-up update).
             not_following: u.disabled.clone().filter(|_| installed::launch().installed).or_else(|| u.no_builder.then(|| NO_BUILDER.to_owned())),
+            wait: u.wait.clone().filter(|_| u.staged.is_some()),
         }
     }
 
@@ -667,6 +844,12 @@ impl Threadbear {
         u.failed = (state == "failed").then(|| "def5678".to_owned());
         u.waiting_for_host = state == "waiting";
         u.no_builder = state == "no-builder";
+        // A scripted app never follows main, so its looks start here: what
+        // a made-up staged build waits on is said as the real one's is.
+        if u.tasks.is_empty() {
+            let restarts = self.restart_looks(cx);
+            self.updater.tasks.push(restarts);
+        }
         self.menus_stale = true;
         cx.notify();
     }

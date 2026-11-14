@@ -4,8 +4,8 @@
 
 export const PROTOCOL_VERSION = 1;
 
-// cursor and opencode run over ACP (adapters/acp/), behind the acpAgents
-// experiment: activeProviders (providers.ts) is the list a runner offers.
+// cursor and opencode run over ACP (adapters/acp/); each turns up as a login
+// only where its CLI is installed and logged in (adapters/acp/agents.ts).
 export type Provider = 'claude' | 'codex' | 'cursor' | 'opencode';
 export const PROVIDERS: readonly Provider[] = ['claude', 'codex', 'cursor', 'opencode'];
 
@@ -317,7 +317,7 @@ export type ThreadSummary = {
 // remote's default branch. scheduled: a schedule that will message it
 // again (at: when), which doesn't stop an archive. Clients show any other
 // kind as its text.
-export type LooseEndKind = 'unlanded' | 'uncommitted' | 'unpushed' | 'unmerged' | 'thread' | 'open' | 'scheduled';
+export type LooseEndKind = 'unlanded' | 'uncommitted' | 'unpushed' | 'unmerged' | 'thread' | 'running' | 'scheduled';
 export type LooseEnd = { kind: LooseEndKind; text: string; threadId?: string; at?: string };
 
 export type ShareAccess = 'off' | 'link';
@@ -868,7 +868,11 @@ export type EventBody =
   // wake: a background task's notification that went into the running
   // turn, which opens a turn that's had its end_turn again (needs.ts,
   // takenEndTurn).
-  | { type: 'system.note'; text: string; wake?: true }
+  // login: the thread's login ran out and it moved, is waiting for room,
+  // or was told not to wait (runner/pools.ts). The only notes the backend
+  // gets (sync.ts toMessageDoc), so another Mac can say a thread changed
+  // login by itself.
+  | { type: 'system.note'; text: string; wake?: true; login?: true; savedMessage?: true }
   | { type: 'error'; message: string }
   // A command action that ran (patches.ts): its output, truncated like a
   // tool result. Outside any turn.
@@ -1034,6 +1038,7 @@ export const ErrorCode = {
   accountNotFound: -32010,
   busy: -32020,
   moved: -32030, // a draining runner has handed the thread over (Handovers)
+  notShownThere: -32031, // threads.send or threads.edit with a runnerId the thread isn't on
   convexSignedOut: -32040, // the runner's Convex CLI isn't signed in ("The Convex panel")
   convexNoAccess: -32041, // its Convex login can't reach the deployment
   backgroundRunning: -32050, // threads.edit without stopBackground while background work runs

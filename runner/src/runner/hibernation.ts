@@ -39,7 +39,9 @@ export const hibernationPart = {
   // to listen for, or both. The thread goes away at once, as a preset
   // does, and the time follows once the model answers; if it can't say,
   // the thread comes back and the call fails with why.
-  async hibernateWhen(this: Runner, params: { threadId: string; said: string }): Promise<{ thread: ThreadSummary; until?: string; topic?: string; why: string }> {
+  // `by: 'agent'`: its own agent asked (snoozeAfterTurn), waiting for
+  // something to happen (WakeWhen.by).
+  async hibernateWhen(this: Runner, params: { threadId: string; said: string; by?: 'agent' }): Promise<{ thread: ThreadSummary; until?: string; topic?: string; why: string }> {
     const st = this.mustGet(params.threadId);
     const said = params.said.trim();
     if (!said) throw new RpcError(ErrorCode.badParams, 'Say when it should wake.');
@@ -48,7 +50,8 @@ export const hibernationPart = {
     if (!models) throw new RpcError(ErrorCode.other, 'Model calls are off in this runner.');
     const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
     const gist = this.threadGist(st.rec.id, { recent: 0 });
-    const input = { said, now: this.clock.now(), timeZone, title: st.rec.title, first: gist.first, brief: st.rec.brief?.text };
+    const by = params.by === 'agent' ? ('agent' as const) : undefined;
+    const input = { said, now: this.clock.now(), timeZone, title: st.rec.title, first: gist.first, brief: st.rec.brief?.text, ...(by ? { by } : {}) };
     this.update({ threadId: st.rec.id, snoozedUntil: NO_WAKE_TIME });
     st.rec.wakeWhen = { said, pending: true };
     this.markDirty(st);
@@ -57,7 +60,7 @@ export const hibernationPart = {
         feature: 'wake-when',
         ...(withThread ? { cwd: st.rec.cwd } : {}),
         system: WAKE_SYSTEM,
-        prompt: wakePrompt(withThread ? input : { said, now: input.now, timeZone, title: '(private)' }),
+        prompt: wakePrompt(withThread ? input : { said, now: input.now, timeZone, title: '(private)', ...(by ? { by } : {}) }),
         maxTokens: 300,
         strong: true,
       });
@@ -75,40 +78,72 @@ export const hibernationPart = {
       st.rec.updatedAt = this.isoNow();
       this.markDirty(st);
       this.armSnoozeTimer();
-      this.kickQueue(st);
+      if (this.bucket(st.rec) === 'inbox') this.kickQueue(st);
       throw new RpcError(ErrorCode.other, `Couldn't work out when to wake it: ${answer.error}`);
     }
     st.rec.snoozedUntil = answer.until ?? NO_WAKE_TIME;
-    st.rec.wakeWhen = { said, ...(answer.topic ? { topic: answer.topic } : {}) };
-    this.emit(st, { type: 'system.note', text: hibernateNote(answer, said, timeZone) });
+    st.rec.wakeWhen = { said, ...(answer.topic ? { topic: answer.topic } : {}), ...(by ? { by } : {}) };
+    // What it already checked counts only for the same words, from its agent.
+    if (st.rec.wakeChecked && (!by || st.rec.wakeChecked.said !== said)) delete st.rec.wakeChecked;
+    this.emit(st, { type: 'system.note', text: hibernateNote(answer, said, timeZone, by) });
     this.armSnoozeTimer();
     this.log.info('hibernated in words', { threadId: st.rec.id, until: answer.until, topic: answer.topic });
     return { thread: this.summary(st), ...answer };
   },
 
-  // Threads hibernating until Mike next talks about something, for the
-  // librarian to listen for.
-  waitingTopics(this: Runner): { threadId: string; title: string; topic: string }[] {
+  // Threads hibernating until Mike next talks about something, or (`happened`)
+  // until something their agent waits for has happened, for the librarian
+  // to listen for.
+  waitingTopics(this: Runner): { threadId: string; title: string; topic: string; happened?: true }[] {
     const now = this.clock.now();
-    const out: { threadId: string; title: string; topic: string }[] = [];
+    const out: { threadId: string; title: string; topic: string; happened?: true }[] = [];
     for (const { rec, rt } of this.threads.values()) {
       const topic = rec.wakeWhen?.topic;
       if (!topic || rt.deleted || rec.archivedAt || !rec.snoozedUntil || Date.parse(rec.snoozedUntil) <= now) continue;
-      out.push({ threadId: rec.id, title: rec.title, topic });
+      out.push({ threadId: rec.id, title: rec.title, topic, ...(rec.wakeWhen?.by === 'agent' ? { happened: true as const } : {}) });
     }
     return out;
   },
 
   // The librarian heard Mike talk about a hibernating thread's topic in
-  // another thread: it wakes, unread, saying where.
-  wakeForTopic(this: Runner, threadId: string, inThreadId: string): boolean {
+  // another thread: it wakes, unread, saying where. One its agent put to
+  // sleep until something happened gets a turn as well, to check it really
+  // has (the librarian reads one thread, and can be wrong) and go back to
+  // sleep if not, rather than sitting in the inbox with nothing done.
+  wakeForTopic(this: Runner, threadId: string, inThreadId: string, shown?: { topic: string; happened: boolean }): boolean {
     const st = this.threads.get(threadId);
-    const topic = st?.rec.wakeWhen?.topic;
-    if (!st || !topic || st.rt.deleted || st.rec.archivedAt || threadId === inThreadId || this.bucket(st.rec) !== 'snoozed') return false;
+    const wakeWhen = st?.rec.wakeWhen;
+    const topic = wakeWhen?.topic;
+    if (!st || !wakeWhen || !topic || st.rt.deleted || st.rec.archivedAt || threadId === inThreadId || this.bucket(st.rec) !== 'snoozed') return false;
+    // Not the wait the librarian judged: set again while its model ran.
+    if (shown && (shown.topic !== topic || shown.happened !== (wakeWhen.by === 'agent'))) return false;
     const where = this.threads.get(inThreadId)?.rec.title;
-    this.wake(st, { why: `you talked about ${topic}${where ? ` in "${where}"` : ' in another thread'}` });
+    if (wakeWhen.by !== 'agent') {
+      this.wake(st, { why: `you talked about ${topic}${where ? ` in "${where}"` : ' in another thread'}` });
+      this.armSnoozeTimer();
+      this.log.info('woke for a topic', { threadId, inThreadId, topic });
+      return true;
+    }
+    // Already woken from this thread for these words, and it has said
+    // nothing since: the agent checked that claim and went back to sleep.
+    const seq = this.threads.get(inThreadId)?.rec.lastSeq ?? 0;
+    const checked = st.rec.wakeChecked?.said === wakeWhen.said ? st.rec.wakeChecked : undefined;
+    if (checked && (checked.from[inThreadId] ?? -1) >= seq) return false;
+    st.rec.wakeChecked = { said: wakeWhen.said, from: { ...checked?.from, [inThreadId]: seq } };
+    this.wake(st, { why: `to check whether ${topic}${where ? `, from "${where}"` : ''}` });
     this.armSnoozeTimer();
-    this.log.info('woke for a topic', { threadId, inThreadId, topic });
+    // Which thread, only where send_message would let it say so without a
+    // card: its id is the way in to its words (read_thread).
+    const tell = this.mayTellOf(this.authorityNow(st.rec.id), inThreadId);
+    const seen = tell ? `another thread (${inThreadId.slice(0, 8)}) looks to show it has` : 'another thread looks to show it has';
+    const said = wakeWhen.said.replace(/\s+/g, ' ').trim();
+    this.sendTo(
+      st,
+      `You hibernated this thread until: ${said}\n\nThreadbear woke it because ${seen} (${topic}), but that's a guess from reading one thread. Check for yourself that it really has${tell ? ' (read_thread on that thread, and the work itself)' : ''}. If it has, carry on with what you meant to do. If it hasn't, call end_turn with needs "nothing" and snooze "${said.replace(/"/g, "'")}" to go back to sleep, and say in a line what's still missing.`,
+      [],
+      { origin: 'runner', queue: true },
+    );
+    this.log.info('woke to check what it waited for', { threadId, inThreadId, topic });
     return true;
   },
 
@@ -255,6 +290,23 @@ export const hibernationPart = {
     return { mode: this.accessOf(threadId), confined: this.confinedOf(threadId) };
   },
 
+  // Whether a thread with access `me` may be handed another thread's words
+  // without a card: the other has no less access (mode or sandbox), as
+  // send_message goes by. One not here counts as the least.
+  mayTellOf(this: Runner, me: Authority, threadId: string): boolean {
+    return !above(me, this.authoritySaved(threadId));
+  },
+
+  // What a thread's agent is held to as a sender: its saved mode, as
+  // send_message goes by (threadbear-mcp.ts, restricted), not the more a
+  // running turn may still have after it was lowered (Codex's review of
+  // Daybreak finding 111). One not here counts as the least.
+  authoritySaved(this: Runner, threadId: string): Authority {
+    const st = this.threads.get(threadId);
+    if (!st) return LEAST;
+    return { mode: st.rec.permissionMode ?? 'ask', confined: Boolean(st.rec.confined) };
+  },
+
   // Whether what a waited-on thread said may go to the waiting thread's
   // agent as a message, as send_message would let it without a card: the
   // waited-on thread has no less access than the waiting one has now, or the
@@ -263,7 +315,7 @@ export const hibernationPart = {
   // it counts only the first (Daybreak, 12 Nov 2026: an Ask helper's closing
   // reply started a turn in its Full-access starter).
   mayHear(this: Runner, me: Authority, w: NonNullable<ThreadState['rec']['waitingOn']>[number]): boolean {
-    if (!above(me, this.authorityNow(w.threadId))) return true;
+    if (this.mayTellOf(me, w.threadId)) return true;
     return !w.quiet && w.by !== undefined && !above(me, w.by);
   },
 
@@ -407,6 +459,17 @@ export const hibernationPart = {
   // inbox with nothing to say why (30 Oct).
   wake(this: Runner, st: ThreadState, cause: 'time' | 'restart' | { why: string }): void {
     const { rec } = st;
+    // Archived since it went to sleep: its hibernation just ends, quietly.
+    // Waking it there gave it a "Woke up" and an unread mark in the
+    // archive, and started any message it had queued while still archived
+    // (13 Nov 2026, the implicit state machines scan). Brought back later,
+    // it's in the inbox, as it would have been.
+    if (rec.archivedAt) {
+      this.endHibernation(st);
+      st.rec.updatedAt = this.isoNow();
+      this.markDirty(st);
+      return;
+    }
     const now = this.clock.now();
     const since = rec.snoozedAt && Date.parse(rec.snoozedAt) <= now ? rec.snoozedAt : undefined;
     // Under a minute (a wake-when cut short by a restart) isn't worth saying.
@@ -420,16 +483,21 @@ export const hibernationPart = {
     // Starting "Woke up" is what gives it the bear in the app (RowContent.isWakeNote).
     this.emit(st, { type: 'system.note', text });
     rec.woke = { at: new Date(now).toISOString(), ...(since ? { since } : {}) };
-    delete rec.snoozedAt;
-    delete st.rec.snoozedUntil;
-    delete st.rec.snoozedUntilRestart;
-    delete st.rec.untilRelease;
-    delete st.rec.wakeWhen;
-    delete st.rec.waitingOn;
+    this.endHibernation(st);
     st.rec.forceUnread = true;
     st.rec.updatedAt = this.isoNow();
     this.markDirty(st);
     this.kickQueue(st);
+  },
+
+  endHibernation(this: Runner, st: ThreadState): void {
+    const { rec } = st;
+    delete rec.snoozedAt;
+    delete rec.snoozedUntil;
+    delete rec.snoozedUntilRestart;
+    delete rec.untilRelease;
+    delete rec.wakeWhen;
+    delete rec.waitingOn;
   },
 };
 

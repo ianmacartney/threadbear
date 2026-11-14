@@ -754,11 +754,15 @@ async function runnerJson(url, site) {
   // blocks each action (Claude only; on Codex it's Ask before edits).
   // Picking Full access in the composer, or "full" here, changes it.
   const mode = fresh ? { permissionMode: 'auto' } : {};
+  // Full sync starts off (docs/full-convex.md step 6): setup leaves sync.full
+  // unset, and the runner offers it once a phone, the website or another
+  // machine would show what it sends (runner/src/convex-use.ts).
   const next = { ...json, sync: { ...json.sync, ...(url ? { url } : {}), ...(site ? { site } : {}), name }, defaults: { ...mode, ...json.defaults, cwd } };
   if (JSON.stringify(next) === JSON.stringify(json)) return ok(`${runnerJsonPath} as it was`);
   if (dry) return todo(`write ${runnerJsonPath}: sync.url ${url ?? '(the new deployment)'}${site ? `, sync.site ${site}` : ''}, sync.name ${name}, defaults.cwd ${cwd}${fresh ? ', defaults.permissionMode auto' : ''}`);
   writeJson(runnerJsonPath, next);
   ok(`mirrors to ${url} as ${name}; new threads start in ${cwd}${fresh ? ', on Auto' : ''}`);
+  if (fresh) note("Full sync is off: turned on, your phone, the website and your other machines can show each thread's tool output and diffs, even when this Mac's asleep. Threadbear offers it once you pair a phone or add a machine, or turn it on with tb settings full on.");
 }
 
 function backend() {

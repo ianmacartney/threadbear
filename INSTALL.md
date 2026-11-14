@@ -147,7 +147,10 @@ yourself: it can run their agents.
 ## 5. Tell them it's done
 
 Say what was set up (their Convex project and its URL, where the app is), and
-that the runner and app update themselves when their `main` changes.
+that the runner and app update themselves when their `main` changes. Also say,
+in a line, that full sync is off: it would let their phone, the website and other
+machines show tool output and diffs too, and Threadbear offers it once they pair a
+phone or add a machine (`tb settings full on` turns it on now).
 
 ## Another Mac (optional)
 
@@ -179,7 +182,7 @@ runner, like a second Mac: its threads show in the Mac app's sidebar and on
 the phone, and the composer's machine chip starts threads there. It runs the
 runner only, no app. Ubuntu 24.04 on x86_64 is what's been tried, on a
 Hetzner cloud server with 8 GB. Do this as an ordinary user with sudo, not root.
-Normal thread control uses Convex; steps 4 and 8 are only for direct access.
+Threads on it are opened and steered from the Mac through Convex, so nothing connects to it directly.
 
 1. **Packages:** `sudo apt-get install -y git build-essential imagemagick
    librsvg2-bin bubblewrap jq lsof rsync` (ImageMagick and rsvg-convert stand in for
@@ -214,17 +217,16 @@ Normal thread control uses Convex; steps 4 and 8 are only for direct access.
    setup gives a new Mac (threads that name no mode start on Auto), and
    `sync.name` (what the sidebar calls this machine). Then, on the first Mac,
    run `tb runner add <name> --ssh <user@server>`. It writes the backend URL,
-   a runner id and a separate runner key to this server. Never copy the Mac's
-   main key or deploy key. Add `sync.rpcUrl` (`wss://<tailnet name>:8798/rpc`)
-   only when setting up the direct Tailscale connection in step 8.
+   a runner id and a separate runner key to this server. Add `sync.full`
+   `true` to send this server's tool output to Convex too, so the Mac, the phone
+   and the website can show it even when this server's off; a runner key's machine
+   is never asked about it. Never copy the Mac's
+   main key or deploy key.
 7. **Install:** `runner/scripts/install-runner.sh`. On Linux it writes a
    systemd user service, `~/.config/systemd/user/com.mikerosoft.threadbear.runner.service`,
    in place of the LaunchAgent. Turn on lingering once, or it stops when
    nobody is logged in: `sudo loginctl enable-linger $USER`.
-8. **Direct access from the Mac (optional):** `sudo tailscale serve --bg --https=8798
-   http://127.0.0.1:8797` here, then `tb pair` here prints the two files to
-   copy to the Mac.
-9. **Updates:** the runner follows its checkout's `main` like the Mac's
+8. **Updates:** the runner follows its checkout's `main` like the Mac's
    does, so keep that checkout pulling theirs: a systemd user timer that runs
    `git -C <checkout> pull --ff-only` every few minutes.
 

@@ -39,8 +39,70 @@ pub struct RunnerUpdates {
     pub upstream: Option<Upstream>,
     /// This machine can't follow GitHub's main properly. None while it's fine.
     pub follow_problem: Option<String>,
+    pub web_runtime_problem: Option<String>,
     /// The other runners saying that of themselves (the main Mac's runner).
     pub behind_runners: Vec<BehindRunner>,
+    /// A fork's own changes to the old Swift app not yet rebuilt in this one
+    /// (protocol "Your changes to the old app"). Empty while there are none.
+    pub swift_changes: Vec<SwiftChange>,
+}
+
+/// One of someone's own commits to the old Swift app.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SwiftChange {
+    pub commit: String,
+    pub short: String,
+    pub subject: String,
+    /// The committer's date, ISO.
+    pub date: String,
+    pub files: Vec<String>,
+    pub more_files: i64,
+    /// An open thread rebuilding it.
+    pub thread_id: Option<String>,
+}
+
+impl SwiftChange {
+    fn decode(v: &Value) -> Option<SwiftChange> {
+        let commit = v["commit"].as_str().filter(|c| !c.is_empty())?.to_owned();
+        Some(SwiftChange {
+            short: v["short"].as_str().map_or_else(|| commit.chars().take(7).collect(), str::to_owned),
+            commit,
+            subject: v["subject"].as_str().unwrap_or("").to_owned(),
+            date: v["date"].as_str().unwrap_or("").to_owned(),
+            files: strings(&v["files"]),
+            more_files: v["moreFiles"].as_i64().unwrap_or(0),
+            thread_id: text(v, "threadId").filter(|t| !t.is_empty()),
+        })
+    }
+}
+
+/// The "Not in the new app yet" section's line above its list.
+pub fn swift_changes_line(n: usize) -> String {
+    if n == 1 {
+        "You changed the old app in 1 place that isn't in this one yet. Port it to rebuild it here, or dismiss it.".to_owned()
+    } else {
+        format!("You changed the old app in {n} places that aren't in this one yet. Port each to rebuild it here, or dismiss it.")
+    }
+}
+
+/// Under a change's subject: its day, short commit and files.
+pub fn swift_change_detail(c: &SwiftChange) -> String {
+    // The day where they made it, from the date's own offset.
+    let day = DateTime::parse_from_rfc3339(&c.date).ok().map(|d| d.format("%-d %b").to_string());
+    let mut files = c.files.iter().map(|f| f.rsplit('/').next().unwrap_or(f).to_owned()).collect::<Vec<_>>();
+    if files.len() > 3 {
+        let more = files.len() as i64 - 3 + c.more_files;
+        files.truncate(3);
+        files.push(format!("{more} more"));
+    } else if c.more_files > 0 {
+        files.push(format!("{} more", c.more_files));
+    }
+    let mut parts = day.into_iter().collect::<Vec<_>>();
+    parts.push(c.short.clone());
+    if !files.is_empty() {
+        parts.push(files.join(", "));
+    }
+    parts.join(" · ")
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -113,12 +175,14 @@ impl RunnerUpdates {
             launcher_reason: text(v, "launcherReason"),
             upstream: Upstream::decode(&v["upstream"]),
             follow_problem: text(v, "followProblem"),
+            web_runtime_problem: text(v, "webRuntimeProblem"),
             behind_runners: v["behindRunners"]
                 .as_array()
                 .into_iter()
                 .flatten()
                 .filter_map(|b| Some(BehindRunner { name: b["name"].as_str()?.to_owned(), problem: b["problem"].as_str()?.to_owned() }))
                 .collect(),
+            swift_changes: v["swiftChanges"]["changes"].as_array().into_iter().flatten().filter_map(SwiftChange::decode).collect(),
         })
     }
 
@@ -191,6 +255,9 @@ pub struct AppSide {
     /// Why the installed GPUI app can't follow main (one installed before it
     /// could, say). The Swift app has no such case.
     pub not_following: Option<String>,
+    /// What the staged build's restart waits on (`restart_wait`), when the
+    /// app knows: a countdown, or what's typed or open.
+    pub wait: Option<crate::app_update::RestartWait>,
 }
 
 impl AppSide {
@@ -211,7 +278,7 @@ fn runner_failed(runner: Option<&RunnerUpdates>) -> bool {
 /// runner: the icon's grey dot. The icon itself is always there since the
 /// CLIs' versions moved into its panel (28 Oct).
 pub fn shown(app: &AppSide, runner: Option<&RunnerUpdates>) -> bool {
-    app.is_pending() || app.failed || app.not_following.is_some() || runner_pending(runner) || runner_failed(runner) || from_mike(runner) || not_following(runner)
+    app.is_pending() || app.failed || app.not_following.is_some() || runner_pending(runner) || runner_failed(runner) || from_mike(runner) || not_following(runner) || runner.is_some_and(|r| r.web_runtime_problem.is_some())
 }
 
 /// A release of Mike's this copy's main doesn't have yet.
@@ -233,6 +300,7 @@ pub const REINSTALL_LINE: &str = "The runner needs reinstalling, which only you 
 /// that everything is up to date. The panel has the rest.
 pub fn icon_tooltip(app: &AppSide, runner: Option<&RunnerUpdates>, clis: &[CliStatus]) -> String {
     let mut lines = vec!["Updates".to_owned()];
+    lines.extend(runner.and_then(|r| r.web_runtime_problem.clone()));
     // A runner app to reinstall gets its own line, as it's the one that's
     // Mike's to do (the accent dot); left in, it read as "A runner update",
     // which looks like one on its way by itself (12 Nov, Mike: "I thought
@@ -438,7 +506,12 @@ pub fn tooltip(app: &AppSide, runner: Option<&RunnerUpdates>) -> String {
 
 pub fn app_line(a: &AppSide) -> String {
     if let Some(staged) = &a.staged {
-        return format!("The app's next version ({staged}) is ready. It switches in when you're not using the app, or now.");
+        use crate::app_update::RestartWait;
+        return match &a.wait {
+            Some(RestartWait::Countdown(n)) => format!("The app's next version ({staged}) is ready. It switches in {n}s if you leave the app alone, or now."),
+            Some(RestartWait::Held(why)) => format!("The app's next version ({staged}) is ready. It switches in once {why}, or now."),
+            None => format!("The app's next version ({staged}) is ready. It switches in when you're not using the app, or now."),
+        };
     }
     if a.building {
         return "Building the app from main.".to_owned();
@@ -507,6 +580,7 @@ pub fn runner_lines(u: Option<&RunnerUpdates>) -> Vec<String> {
     let Some(u) = u else { return vec!["This runner doesn't say how its updates are going.".to_owned()] };
     let mut out: Vec<String> = [build_line(u), old_runners_line(u), launcher_line(u)].into_iter().flatten().collect();
     out.extend(follow_lines(u));
+    out.extend(u.web_runtime_problem.clone());
     if out.is_empty() {
         out.push("The runner is up to date.".to_owned());
     }
@@ -743,6 +817,25 @@ mod tests {
     use chrono::{FixedOffset, Local};
     use serde_json::json;
 
+    #[test]
+    fn swift_changes_from_a_fork() {
+        let u = RunnerUpdates::decode(&json!({ "state": "idle", "swiftChanges": { "state": "ready", "checkout": "/Users/me/threadbear", "changes": [
+            { "commit": "abc1234def", "short": "abc1234", "subject": "Orange dock badge", "date": "2026-11-02T03:00:00+08:00", "files": ["dock/Sources/Badge.swift"], "threadId": "t1" },
+            { "commit": "0123456789", "subject": "Bigger sidebar font", "date": "2026-10-20T10:00:00Z", "files": ["app/A.swift", "app/B.swift", "app/C.swift", "app/D.swift"], "moreFiles": 2 },
+            { "subject": "no commit" },
+            "junk"
+        ], "somethingNew": 1 } })).unwrap();
+        assert_eq!(u.swift_changes.len(), 2);
+        assert_eq!(u.swift_changes[0].thread_id.as_deref(), Some("t1"));
+        assert_eq!(u.swift_changes[1].short, "0123456");
+        assert_eq!(swift_change_detail(&u.swift_changes[0]), "2 Nov · abc1234 · Badge.swift");
+        assert_eq!(swift_change_detail(&u.swift_changes[1]), "20 Oct · 0123456 · A.swift, B.swift, C.swift, 3 more");
+        assert_eq!(swift_changes_line(1), "You changed the old app in 1 place that isn't in this one yet. Port it to rebuild it here, or dismiss it.");
+        assert!(swift_changes_line(2).starts_with("You changed the old app in 2 places that aren't"));
+        // Mike's own runner, or an older one, says nothing.
+        assert!(RunnerUpdates::decode(&json!({ "state": "idle" })).unwrap().swift_changes.is_empty());
+    }
+
     /// The mock runner's two CLIs (app/Tools/mock-runner/server.mjs).
     fn mock_clis() -> Vec<CliStatus> {
         decode_clis(&json!([
@@ -751,6 +844,16 @@ mod tests {
               "checkedAt": "2026-11-11T01:00:00.000Z", "hold": { "version": "0.165.0", "reason": "the app-server protocol changed", "missing": ["thread/backgroundTerminals/list"] } },
             { "path": "no provider" },
         ]))
+    }
+
+    #[test]
+    fn stale_web_runtime_is_visible_in_the_panel_and_updates_icon() {
+        let u = RunnerUpdates::decode(&json!({ "state": "idle", "webRuntimeProblem": "CEF needs updating" })).unwrap();
+        let app = AppSide::default();
+        assert_eq!(runner_lines(Some(&u)), vec!["CEF needs updating"]);
+        assert!(shown(&app, Some(&u)));
+        assert!(icon_tooltip(&app, Some(&u), &[]).contains("CEF needs updating"));
+        assert!(!needs_you(&app, Some(&u)));
     }
 
     #[test]
@@ -851,6 +954,20 @@ mod tests {
         let waiting = AppSide { running: Some("abc1234".into()), waiting: true, ..Default::default() };
         assert!(shown(&waiting, None) && !needs_you(&waiting, None));
         assert_eq!(app_line(&waiting), "The app has a new version on main, waiting for a Mac to build it on.");
+    }
+
+    // Mike, 13 Nov: a countdown that starts again when he does something,
+    // and otherwise what it's waiting for.
+    #[test]
+    fn a_staged_app_says_what_its_restart_waits_on() {
+        use crate::app_update::RestartWait;
+        let staged = |wait| AppSide { running: Some("abc1234".into()), staged: Some("def5678".into()), wait, ..Default::default() };
+        assert_eq!(app_line(&staged(None)), "The app's next version (def5678) is ready. It switches in when you're not using the app, or now.");
+        assert_eq!(app_line(&staged(Some(RestartWait::Countdown(3)))), "The app's next version (def5678) is ready. It switches in 3s if you leave the app alone, or now.");
+        assert_eq!(
+            app_line(&staged(Some(RestartWait::Held("the message box in “Fix it” is sent or cleared".into())))),
+            "The app's next version (def5678) is ready. It switches in once the message box in “Fix it” is sent or cleared, or now."
+        );
     }
 
     #[test]
