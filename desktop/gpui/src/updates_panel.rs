@@ -20,15 +20,12 @@ use gpui_kit::*;
 use crate::style::px;
 use serde_json::{json, Value};
 use std::collections::HashSet;
-use std::time::Duration;
 use threadbear_core::inbox::ThreadSummary;
 use threadbear_core::new_thread::{Draft, NewThreadPicks};
 use threadbear_core::updates::{self as rules, AppSide, CliStatus, RunnerUpdates};
 use crate::tips::Tip as _;
 
 
-/// How long Copy says it copied.
-const COPIED_FOR: Duration = Duration::from_millis(1500);
 
 /// The Updates panel's state in the app (`Threadbear::updates_panel`).
 #[derive(Default)]
@@ -49,10 +46,9 @@ pub(crate) struct UpdatesPanelState {
     pub(crate) bringing_in: bool,
     /// Port this on its way, by commit.
     pub(crate) porting: HashSet<String>,
-    /// The launcher's command was copied a moment ago (counts the copies, so
-    /// an older one's timer leaves a newer one's word alone).
-    copied: Option<u64>,
-    copies: u64,
+    /// Update it is on its way to the runner (runner.reinstall), until
+    /// its answer brings the runner's own word of it.
+    pub(crate) reinstalling: bool,
     /// The icon's right-click popover is up, and its keyboard (Return
     /// restarts, Esc puts it away).
     pub(crate) popover: bool,
@@ -66,7 +62,7 @@ impl Threadbear {
     /// has none, and `clis.list` tells which.
     pub(crate) fn updates_from_hello(&mut self, hello: &Value) {
         let panel = &mut self.updates_panel;
-        panel.clis = rules::decode_clis(&hello["clis"]);
+        panel.clis = rules::decode_clis_with(&hello["clis"], &self.logins);
         panel.clis_supported = if panel.clis.is_empty() { None } else { Some(true) };
         panel.runner = RunnerUpdates::decode(&hello["updates"]);
         panel.busy.clear();
@@ -83,7 +79,7 @@ impl Threadbear {
             this.update(cx, |t, cx| {
                 match res {
                     Ok(v) => {
-                        t.updates_panel.clis = rules::decode_clis(&v["clis"]);
+                        t.updates_panel.clis = rules::decode_clis_with(&v["clis"], &t.logins);
                         t.updates_panel.clis_supported = Some(true);
                     }
                     Err(e) if e.code == -32601 => {
@@ -101,7 +97,7 @@ impl Threadbear {
 
     /// `clis.updated`: the latest list wins.
     pub(crate) fn clis_updated(&mut self, params: &Value) {
-        self.updates_panel.clis = rules::decode_clis(&params["clis"]);
+        self.updates_panel.clis = rules::decode_clis_with(&params["clis"], &self.logins);
         self.updates_panel.clis_supported = Some(true);
     }
 
@@ -146,7 +142,7 @@ impl Threadbear {
                 t.updates_panel.busy.remove(&key);
                 match res {
                     Ok(v) => {
-                        t.updates_panel.clis = rules::decode_clis(&v["clis"]);
+                        t.updates_panel.clis = rules::decode_clis_with(&v["clis"], &t.logins);
                         t.updates_panel.clis_supported = Some(true);
                     }
                     Err(e) => {
@@ -247,21 +243,33 @@ impl Threadbear {
         .detach();
     }
 
-    /// Copy: the command, to run in Terminal. The button says Copied for a
-    /// moment, as nothing else shows the click took.
-    fn copy_install_command(&mut self, command: String, cx: &mut Context<Self>) {
-        cx.write_to_clipboard(ClipboardItem::new_string(command));
-        self.updates_panel.copies += 1;
-        let n = self.updates_panel.copies;
-        self.updates_panel.copied = Some(n);
+    /// Update it (or Try again): the runner stages its LaunchAgent
+    /// without stopping anything (protocol "Runner updates"). The button spins
+    /// and takes no clicks from the press until the runner says where it's
+    /// got to; an error puts it back, with the error.
+    fn reinstall_runner(&mut self, cx: &mut Context<Self>) {
+        if self.updates_panel.reinstalling {
+            return;
+        }
+        self.updates_panel.reinstalling = true;
         cx.notify();
+        let client = self.client.clone();
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(COPIED_FOR).await;
+            let res = call(client, "runner.reinstall", json!({})).await;
             this.update(cx, |t, cx| {
-                if t.updates_panel.copied == Some(n) {
-                    t.updates_panel.copied = None;
-                    cx.notify();
+                t.updates_panel.reinstalling = false;
+                match res {
+                    Ok(v) => {
+                        if let Some(r) = t.updates_panel.runner.as_mut() {
+                            r.reinstall = rules::Reinstall::decode(&v["reinstall"]);
+                        }
+                    }
+                    // A runner from before Update it: it gets it with
+                    // its next update from main, a few minutes after this app.
+                    Err(e) if e.code == -32601 => t.show_error("This runner can't update Threadbear Runner yet. It can once it updates to main, in a few minutes; try again then.".to_owned(), cx),
+                    Err(e) => t.show_error(e.message, cx),
                 }
+                cx.notify();
             })
             .ok();
         })
@@ -342,13 +350,6 @@ impl Threadbear {
 
     // What it shows.
 
-    /// The command for a changed launch.mjs, from the checkout the runner
-    /// follows when it says, else where the README's fork puts one.
-    fn install_command(&self) -> String {
-        let checkout = self.updates_panel.runner.as_ref().and_then(|r| r.upstream.as_ref()).and_then(|u| u.checkout.clone());
-        rules::install_command(checkout.as_deref(), &std::env::var("HOME").unwrap_or_default())
-    }
-
     /// A thread's title for a link to it, or the start of its id when it
     /// isn't listed here.
     pub(crate) fn thread_title(&self, id: &str) -> String {
@@ -427,7 +428,7 @@ impl Threadbear {
         let line = h_flex()
             .gap(px(7.))
             .items_center()
-            .when(side.building && side.staged.is_none(), |s| s.child(div().size(px(11.)).child(gpui_kit::component::spinner::Spinner::new().icon(gpui_kit::assets::IconName::LoaderCircle).color(secondary).with_size(px(11.)))))
+            .when(side.building && side.staged.is_none(), |s| s.child(div().size(px(11.)).child(crate::spinner::Spinner::new().icon(gpui_kit::assets::IconName::LoaderCircle).color(secondary).with_size(px(11.)))))
             .child(div().whitespace_nowrap().text_size(px(12.)).text_color(style::label_text(cx)).child(rules::popover_line(&side)));
         let button = match &staged {
             // Return takes it, as the popover is there for this.
@@ -519,18 +520,17 @@ impl Threadbear {
         }
         if let Some(launcher) = launcher {
             out.push(line(launcher));
-            let command = self.install_command();
-            let copy = command.clone();
-            let copied = self.updates_panel.copied.is_some();
-            let mono = cx.theme().mono_font_family.clone();
-            out.push(
-                h_flex()
-                    .gap(px(6.))
-                    .items_center()
-                    .child(text_line(command, 11., fg).font_family(mono).flex_1().min_w_0().line_clamp(2))
-                    .child(push_button("updates-copy", if copied { "Copied" } else { "Copy" }, "Copy the command, to run in Terminal", false, false, cx, move |t, _, cx| t.copy_install_command(copy.clone(), cx)))
-                    .into_any_element(),
-            );
+            let log = runner.reinstall.as_ref().filter(|r| r.state == "failed").and_then(|r| r.log_file.clone());
+            if let Some((label, tip, on_its_way)) = rules::launcher_button(&runner) {
+                let busy = on_its_way || self.updates_panel.reinstalling;
+                out.push(
+                    h_flex()
+                        .gap(px(6.))
+                        .child(push_button("updates-reinstall", label, tip, false, busy, cx, |t, _, cx| t.reinstall_runner(cx)))
+                        .children(log.map(|file| push_button("updates-reinstall-log", "Show the Log", "Open the update's output, to see why it didn't work", false, false, cx, move |_, _, cx| crate::open_gate::open_own(std::path::Path::new(&file), cx))))
+                        .into_any_element(),
+                );
+            }
         }
         out
     }
@@ -731,7 +731,10 @@ impl Threadbear {
                 }
                 if let Some(launcher) = launcher {
                     lines.push(launcher);
-                    lines.push(format!("  $ {} [Copy]", self.install_command()));
+                    if let Some((label, _, on_its_way)) = rules::launcher_button(runner) {
+                        let busy = on_its_way || self.updates_panel.reinstalling;
+                        lines.push(format!("  [{label}{}]", if busy { ": busy" } else { "" }));
+                    }
                 }
             }
             None => lines.extend(rules::runner_lines(None)),
@@ -775,7 +778,7 @@ fn section(title: &'static str, content: Vec<AnyElement>, cx: &App) -> AnyElemen
 /// The automation's `updates` (the Swift app's): `show` opens or closes the
 /// panel; with nothing, whether the icon has its dot, its tooltip, and what
 /// the panel says about the app and the runner. `preview` makes up the app's
-/// own update first (`staged`, `building`, `failed`, `waiting` or `none`), as
+/// own update first (`staged`, `building`, `settling`, `failed`, `waiting` or `none`), as
 /// the Swift app's; this app has no right-click popover (`rightClick`).
 pub(crate) fn automation(app: &Entity<Threadbear>, cmd: &Value, window: &mut Window, cx: &mut App) -> Result<Value, String> {
     // What a restart onto an update leaves for the next launch, put back as
@@ -802,8 +805,8 @@ pub(crate) fn automation(app: &Entity<Threadbear>, cmd: &Value, window: &mut Win
         return Ok(json!("ok"));
     }
     if let Some(state) = cmd["preview"].as_str() {
-        if !["staged", "building", "failed", "waiting", "no-builder", "none"].contains(&state) {
-            return Err("preview is staged, building, failed, waiting, no-builder or none".into());
+        if !["staged", "building", "settling", "failed", "waiting", "no-builder", "none"].contains(&state) {
+            return Err("preview is staged, building, settling, failed, waiting, no-builder or none".into());
         }
         app.update(cx, |t, cx| t.preview_update(state, cx));
     }

@@ -203,9 +203,9 @@ struct ThreadView: View {
                         WorkingLine(text: thread.working)
                             .id("working:\(thread.status == .running)")
                     } else if let asks = thread.asks, !asks.isEmpty, showsAsks(thread) {
-                        AsksCard(asks: asks, picks: $picks, busy: sendingCard, send: {
+                        AsksCard(asks: asks, picks: $picks, busy: sendingCard) {
                             sendCard(thread, lastSeq: messages.last?.seq)
-                        }, run: { model.pressRun(threadId: thread.threadId, buttonId: $0.buttonId) }, pressingRuns: model.pressingRuns)
+                        }
                         .onChange(of: thread.asksSeq, initial: true) {
                             // A new card starts with nothing picked.
                             if pickedFor != thread.asksSeq { picks = [:]; pickedFor = thread.asksSeq }
@@ -1182,8 +1182,10 @@ struct MarkdownText: View {
         case let .image(alt, src):
             if let image = pictures.image(src: src, seq: seq), let url = URL(string: image.url) {
                 ReplyPicture(url: url, alt: alt, width: image.width, height: image.height)
-            } else if let url = ThreadPictures.webURL(src) {
-                ReplyPicture(url: url, alt: alt)
+            } else if let url = ThreadPictures.webLink(src) {
+                // Never fetched here: a link, like any other in the reply
+                // (Daybreak findings 129 and 133).
+                WebPictureLink(alt: alt, url: url)
             } else {
                 PictureOnMac(alt: alt)
             }

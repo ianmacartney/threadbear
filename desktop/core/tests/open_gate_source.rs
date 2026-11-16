@@ -70,8 +70,16 @@ const ALLOWED_LINES: &[(&str, &str, usize)] = &[
     ("gpui/src/handover.rs", "let mut command = std::process::Command::new(\"/usr/bin/open\");", 1),
     ("gpui/src/app_update.rs", "let out = Command::new(\"/usr/bin/git\").args(rules::rev_parse_arguments(checkout)).stdin(Stdio::null()).output().ok()?;", 1),
     ("gpui/src/app_update.rs", "let child = Command::new(program).args(arguments).current_dir(installed::home_dir()).stdin(Stdio::null()).stdout(out).stderr(err).spawn();", 1),
+    // Build-time SDK/compiler discovery and the fixed Translate source compile.
+    // No app runtime, link, file or runner content supplies these commands.
+    ("gpui/build.rs", "let sdk = Command::new(\"xcrun\").args([\"--sdk\", \"macosx\", \"--show-sdk-path\"]).output().expect(\"find macOS SDK\");", 1),
+    ("gpui/build.rs", "let compiler = Command::new(\"xcrun\").args([\"--find\", \"swiftc\"]).output().expect(\"find swiftc\");", 1),
+    ("gpui/build.rs", "let status = Command::new(&compiler).args([\"-parse-as-library\", \"-emit-object\", \"-O\", \"-import-objc-header\", \"native/text_selection.h\", \"-module-name\", \"ThreadbearTranslation\", \"-target\", &format!(\"{arch}-apple-macosx13.0\"), \"-sdk\", sdk, \"-module-cache-path\"]).arg(out.join(\"swift-modules\"))", 1),
     // Encodes the gate's checked descriptor (an application's icon is its icns file).
     ("gpui/native/file_icons.m", "int tb_file_icon_png(int fd, long long length, void **output) {", 1),
+    // Reads only the system display preference. This NSWorkspace property
+    // opens no URL or file and takes no runner-controlled argument.
+    ("gpui/src/style.rs", "objc2_app_kit::NSWorkspace::sharedWorkspace().accessibilityDisplayShouldIncreaseContrast()", 1),
     // A test that reads Launch Services' list for Chrome's id, to see an
     // impostor's icon being drawn didn't register it (Daybreak 112). Opens nothing.
     ("gpui/src/open_gate/icon_tests.rs", "use objc2_app_kit::NSWorkspace;", 1),
@@ -279,7 +287,7 @@ fn the_media_views_read_only_what_the_gate_checked() {
 #[test]
 fn fixed_apps_start_only_once_signed_and_icons_never_ask_launch_services() {
     let desktop = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_owned();
-    let gate = std::fs::read_to_string(desktop.join("gpui/src/open_gate.rs")).unwrap();
+    let gate = std::fs::read_to_string(desktop.join("gpui/src/open_gate.rs")).unwrap().replace("\r\n", "\n");
     assert!(!gate.contains("iconForFile"), "the gate asks NSWorkspace for an icon");
     let mut native = Vec::new();
     rust_files(&desktop.join("gpui"), &mut native);
@@ -287,13 +295,54 @@ fn fixed_apps_start_only_once_signed_and_icons_never_ask_launch_services() {
         let text = std::fs::read_to_string(file).unwrap();
         assert!(!text.contains("iconForFile") && !text.contains("[NSWorkspace"), "{} asks NSWorkspace", file.display());
     }
-    let chrome = gate.split("fn start_chrome_profile(").nth(1).unwrap().split("\n}\n").next().unwrap();
+    let chrome = fn_body(&gate, "fn start_chrome_profile(");
     let check = chrome.find("signed_as(path, GOOGLE_CHROME)").expect("Chrome is checked");
     assert!(check < chrome.find("Command::new(\"/usr/bin/open\")").unwrap(), "checked before it's started");
     assert!(chrome.contains(".arg(&real)"), "the checked path is the one started");
     assert!(gate.contains("certificate leaf[subject.OU] = \\\"EQHXZ8M8AV\\\""), "Google's team");
     assert!(!gate.contains("URLForApplicationWithBundleIdentifier(&NSString::from_str(threadbear_core::reply_links::CHROME_BUNDLE_ID))"), "Chrome by id, not the running one");
-    let simulator = gate.split("fn apple_simulator(").nth(1).unwrap().split("\n}\n").next().unwrap();
+    let simulator = fn_body(&gate, "fn apple_simulator(");
     assert!(simulator.contains("signed_as(path, \"anchor apple and identifier"));
     assert_eq!(gate.matches("Command::new(\"/usr/bin/open\")").count(), 1, "one place starts an application by path");
+}
+
+/// A top-level function's body, up to its closing `}` line. The source is
+/// read with `\r\n` endings on a Windows checkout, where splitting at
+/// `"\n}\n"` found nothing and the "body" ran to the end of the file, so a
+/// check moved into a later function still passed. Line endings are made
+/// `\n` first.
+fn fn_body(source: &str, signature: &str) -> String {
+    let source = source.replace("\r\n", "\n");
+    let rest = source.split(signature).nth(1).unwrap_or_else(|| panic!("{signature} not found"));
+    rest.split("\n}\n").next().unwrap().to_owned()
+}
+
+#[test]
+fn a_function_body_ends_at_its_own_brace_with_either_line_ending() {
+    let source = "fn start_chrome_profile(path: &Path) {\n    open(path);\n}\n\nfn later() {\n    signed_as(path, GOOGLE_CHROME);\n}\n";
+    for text in [source.to_owned(), source.replace('\n', "\r\n")] {
+        let body = fn_body(&text, "fn start_chrome_profile(");
+        assert!(body.contains("open(path);"));
+        assert!(!body.contains("signed_as"), "a check in a later function counts for this one");
+    }
+}
+
+/// Daybreak 125 (15 Nov 2026): a file the gate checked went to the system by
+/// its path, which the system looked up again after the check, so a swap in
+/// between launched an app. Every file open goes through `open_checked`, and
+/// on a Mac it opens a reference to the checked inode, never the path.
+#[test]
+fn checked_files_open_by_reference_not_by_path() {
+    let gate = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../gpui/src/open_gate.rs")).unwrap().replace("\r\n", "\n");
+    let open_file = fn_body(&gate, "pub(crate) fn open_file(");
+    assert!(!open_file.contains("system_open("), "open_file opens without open_checked:\n{open_file}");
+    assert_eq!(open_file.matches("open_checked(").count(), 2, "both the document and the yes go through open_checked:\n{open_file}");
+    let checked = fn_body(&gate, "fn open_checked(");
+    assert!(checked.contains("still_same("), "open_checked doesn't look again");
+    let mac = gate.split("#[cfg(target_os = \"macos\")]\nfn open_the_file(").nth(1).expect("the Mac's open_the_file");
+    let mac = fn_body(&format!("fn open_the_file({mac}"), "fn open_the_file(");
+    assert!(mac.contains("fileReferenceURL()") && mac.contains("reference_id("), "the Mac opens the path, not the checked inode");
+    // Only a private copy (a disk with no file references) goes by its path.
+    let without_copies = mac.replace("system_open(&copy_url, cx)", "");
+    assert!(!without_copies.contains("system_open(") && !mac.contains("fileURLWithPath(&NSString::from_str(url"), "the Mac hands a path to the system:\n{mac}");
 }

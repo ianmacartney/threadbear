@@ -14,6 +14,7 @@ import { isMoved, mergeSummaries, type Bucket } from './handover.ts';
 import { AUTH_VERSION, authProof, isNonce, isThreadId, newNonce, proofMatches, threadKey, type AuthChannel } from './rpc-auth.ts';
 import type { CallerGate } from './rpc-gate.ts';
 import { cutSafely } from './safe-cut.ts';
+import { wellFormedJson } from './well-formed-json.ts';
 
 type Conn = {
   id: number;
@@ -398,7 +399,8 @@ export class RpcServer {
       return;
     }
     if (skippable && buffered > (this.opts.skipDeltasBytes ?? SKIP_DELTAS_BYTES)) return;
-    conn.ws.send(msg);
+    // No half emoji: the apps' JSON parsers refuse the message (well-formed-json.ts).
+    conn.ws.send(wellFormedJson(msg));
   }
 
   private broadcast(n: Notification): void {
@@ -672,6 +674,8 @@ export class RpcServer {
           // caller gate takes it out of any thread's own call.
           ...(p.unconfine === true ? { unconfine: true } : {}),
           ...optStartedBy(p),
+          // Not to nest under the thread in startedBy (Nested threads).
+          ...(p.detached === true ? { detached: true } : {}),
           ...optProjectIds(p),
         });
         return { thread: res.thread, turnId: res.turnId };
@@ -741,6 +745,10 @@ export class RpcServer {
         if (p.starred !== undefined) {
           if (typeof p.starred !== 'boolean') throw bad('starred must be a boolean');
           upd.starred = p.starred;
+        }
+        if (p.detached !== undefined) {
+          if (typeof p.detached !== 'boolean') throw bad('detached must be a boolean');
+          upd.detached = p.detached;
         }
         if (p.carryOnAtReset !== undefined) {
           if (typeof p.carryOnAtReset !== 'boolean') throw bad('carryOnAtReset must be a boolean');

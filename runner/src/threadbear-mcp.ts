@@ -25,7 +25,7 @@ import { SAID_MAX } from './wake-when.ts';
 
 export { parseWhen, relativeFuture, relativeTime };
 import { RUNNER_VERSION, expandHome } from './config.ts';
-import { runCommandProblem, droppedOpenLines, OPEN_GONE, ALREADY_ENDED, ARCHIVE_ADDED, MAX_UNTIL, MAX_WAIT_FOR, SNOOZE_ADDED, snoozeFromTool, endTurnDescription, endTurnForm, endTurnMisfit, endTurnTaken, openCardsNote, END_TURN_TOOL, BULLETS_ONLY, ENDED, takenEndTurn, MAX_BYLINE, NARRATION_ONLY, NO_REPLY, needsFromTool, oneReplyAccepted, offersToTakeItBack, oneReplyAlreadyWritten, summaryFromTool, triedFirstNudged, tryFirstNudge, turnReply, unreadMessageRefusal, type TurnReply } from './needs.ts';
+import { droppedOpenLines, OPEN_GONE, ALREADY_ENDED, ARCHIVE_ADDED, MAX_UNTIL, MAX_WAIT_FOR, SNOOZE_ADDED, snoozeFromTool, endTurnDescription, endTurnForm, endTurnMisfit, endTurnTaken, openCardsNote, END_TURN_TOOL, BULLETS_ONLY, ENDED, takenEndTurn, MAX_BYLINE, NARRATION_ONLY, NO_REPLY, needsFromTool, oneReplyAccepted, offersToTakeItBack, oneReplyAlreadyWritten, summaryFromTool, triedFirstNudged, tryFirstNudge, turnReply, unreadMessageRefusal, type TurnReply } from './needs.ts';
 
 // end_turn's needs, both forms: "done" meant this turn's step until 11 Nov
 // 2026, when thread 0222c475 said nothing with three draft PRs unmerged in
@@ -263,9 +263,6 @@ export function buildThreadbearTools(
     gateway?: () => string | undefined;
     gatewayHealth?: () => Promise<ConnectorService[] | undefined>;
     remote?: () => RemoteControl | undefined;
-    // The runAsks experiment: end_turn's asks[].run is only offered while
-    // it's on.
-    runAsks?: () => boolean;
   } = {},
 ) {
   const codex = opts.provider === 'codex';
@@ -1463,9 +1460,6 @@ export function buildThreadbearTools(
                 .max(3)
                 .optional()
                 .describe('Where to go to do it or judge it: the page, the PR, the file. Give one whenever there is somewhere to go.'),
-              ...(opts.runAsks?.() === true
-                ? { run: z.string().optional().describe("A shell command for them to run with one press, when it's theirs to run and you can't (prod, a deploy). The card shows it with a Run button; it runs once in this thread's folder with no way to answer a prompt, and the output comes back to you as a message.") }
-                : {}),
             }),
           )
           .max(10)
@@ -1493,12 +1487,6 @@ export function buildThreadbearTools(
       },
       handle(sayingOpenCards(async (input) => {
         checkSnooze(input.snooze);
-        // Refused rather than dropped, so the agent doesn't tell them there's
-        // a Run button when the card has none.
-        for (const ask of (input as { asks?: { run?: unknown }[] }).asks ?? []) {
-          const problem = typeof ask.run === 'string' ? runCommandProblem(ask.run) : undefined;
-          if (problem) throw new Error(problem);
-        }
         const parsed = needsFromTool(input);
         const needs = parsed?.needs ?? 'nothing';
         await checkWaitFor(input.waitFor, needs);
@@ -1868,8 +1856,9 @@ export function buildThreadbearTools(
         permissionMode: z.enum(['full', 'ask', 'auto']).optional().describe('"full" (default), "ask" before edits and commands, or "auto": a classifier approves or blocks each action and asks only when it can\'t decide, for work on untrusted text (Claude only; on Codex it acts like ask).'),
         why: z.string().optional().describe('A few plain words on why this thread exists, about 6 ("fixing a hook it hit"). The sidebar shows them when the user hovers the mark on its row, as they have none of your context for it.'),
         runner: z.string().optional().describe('Another of the user\'s machines to start it on: its name, or "main". folder is a path there (~ for its home). Where this machine can\'t, it asks the user first and waits.'),
+        nested: z.boolean().optional().describe("false when the new thread isn't part of this thread's work (the user asked for one about something else), so it doesn't sit under this one."),
       },
-      handle(async ({ text, title, folder: f, pool: p, account: acc, model, effort, permissionMode: asked, why, runner }, extra) => {
+      handle(async ({ text, title, folder: f, pool: p, account: acc, model, effort, permissionMode: asked, why, runner, nested }, extra) => {
         // From a thread not in full mode, the new thread gets its mode
         // unless the call says otherwise, and anything above it asks
         // (raising access, above). On another machine too.
@@ -1921,6 +1910,9 @@ export function buildThreadbearTools(
           effort,
           permissionMode,
           startedBy: { kind: 'thread', label: 'Agent', threadId: selfId, ...(why?.trim() ? { why: cutSafely(why.replace(/\s+/g, ' ').trim(), MAX_BYLINE) } : {}) },
+          // Not part of this thread's work: it keeps a row of its own
+          // (docs/protocol.md, "Nested threads").
+          ...(nested === false ? { detached: true as const } : {}),
         });
         const where = r.thread.poolId ? ` It's in the ${r.thread.poolId} pool, so it moves to another login if this one runs dry.` : '';
         const inherited = caller && asked === undefined ? ` It's in ${MODE_NAMES[caller.mode]}, as this thread is${confined ? ', in the sandbox' : ''}.` : '';
@@ -1951,7 +1943,10 @@ export function buildThreadbearTools(
           if (r?.queued) return `Queued for ${id.slice(0, 8)} "${hit.other.t.title}" on ${hit.other.runner}, which hasn't picked it up yet (it may be busy restarting or asleep). It gets it when it next checks in.`;
           return `Sent to ${id.slice(0, 8)} "${hit.other.t.title}" on ${hit.other.runner}.`;
         }
-        await control.send(id, head + text);
+        const sent = (await control.send(id, head + text)) as { turnId: string; held?: boolean };
+        // A report to the thread that started this one, kept until its
+        // other threads finish (docs/protocol.md, "Nested threads").
+        if (sent.held) return `Held for ${id.slice(0, 8)} "${(await control.get(id)).title}": it gets this with the other reports once the threads it started have finished, so there's no need to send it again.`;
         return `Sent to ${id.slice(0, 8)} "${(await control.get(id)).title}".`;
       }),
     ),
@@ -2262,13 +2257,13 @@ export function serverInstructions(selfId: string, o: { one: boolean; bulletRepl
   );
 }
 
-export function threadbearMcpServer(control: ThreadControl, selfId: string, schedules?: ScheduleControl, projects?: ProjectControl, appRestarts?: AppRestartControl, bulletReplies: () => boolean = () => true, pocket?: () => PocketControl | undefined, oneReply: () => boolean = () => false, gateway?: () => string | undefined, gatewayHealth?: () => Promise<ConnectorService[] | undefined>, remote?: () => RemoteControl | undefined, runAsks?: () => boolean): McpSdkServerConfigWithInstance {
+export function threadbearMcpServer(control: ThreadControl, selfId: string, schedules?: ScheduleControl, projects?: ProjectControl, appRestarts?: AppRestartControl, bulletReplies: () => boolean = () => true, pocket?: () => PocketControl | undefined, oneReply: () => boolean = () => false, gateway?: () => string | undefined, gatewayHealth?: () => Promise<ConnectorService[] | undefined>, remote?: () => RemoteControl | undefined): McpSdkServerConfigWithInstance {
   const one = oneReply();
   const server = createSdkMcpServer({
     name: SERVER_NAME,
     version: RUNNER_VERSION,
     instructions: serverInstructions(selfId, { one, bulletReplies: bulletReplies(), pocket: Boolean(pocket?.()), projects: Boolean(projects) }),
-    tools: buildThreadbearTools(control, selfId, Date.now, schedules, projects, appRestarts, { bulletReplies, pocket, oneReply: () => one, gateway, gatewayHealth, remote, runAsks }),
+    tools: buildThreadbearTools(control, selfId, Date.now, schedules, projects, appRestarts, { bulletReplies, pocket, oneReply: () => one, gateway, gatewayHealth, remote }),
   });
   server.tools = [...ALWAYS_ASK_TOOLS].map((name) => ({ name: name.split('__').at(-1)!, permission_policy: 'always_ask' as const }));
   return server;

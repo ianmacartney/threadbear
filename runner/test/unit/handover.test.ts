@@ -133,7 +133,7 @@ test('a message to a thread that background work is holding starts at once on th
   const handed: string[] = [];
   await h.runner.beginDrain([t.id], { onHandedOver: (id) => handed.push(id), backgroundMs: 30 * MIN });
   assert.deepEqual(handed, []);
-  // Waiting for the work to end could take half an hour, with Mike's answer
+  // Waiting for the work to end could take half an hour, with Alex's answer
   // unread and his card still open.
   h.runner.send(t.id, 'how did it go?');
   assert.equal(s.sent.length, 2);
@@ -530,15 +530,13 @@ test("the phone's commands reach a thread a draining runner still has", async ()
   await host.update({ threadId: busy.id, archived: true });
   await host.respondApproval({ threadId: busy.id, approvalId: 'a1', decision: 'allow' });
   await host.share(busy.id, { access: 'link' });
-  // Its buttons too, which a press from the phone checks first (Codex's review, 10 Nov).
-  await host.listButtons!(busy.id);
-  assert.deepEqual(sent.map(([m]) => m), ['threads.send', 'threads.markSeen', 'threads.update', 'approvals.respond', 'threads.share', 'buttons.list']);
+  assert.deepEqual(sent.map(([m]) => m), ['threads.send', 'threads.markSeen', 'threads.update', 'approvals.respond', 'threads.share']);
   assert.deepEqual(sent[0][1], { threadId: busy.id, text: 'from my phone', origin: 'phone' });
   assert.ok((sent[1][1].seq as number) >= Number.MAX_SAFE_INTEGER, 'seen up to whatever it has');
   // The primary's own threads are done here.
   await host.update({ threadId: idle.id, title: 'Renamed' });
   assert.equal(b.runner.get(idle.id).title, 'Renamed');
-  assert.equal(sent.length, 6);
+  assert.equal(sent.length, 5);
   // Handed over just as the command went: done here instead.
   moved = true;
   await host.update({ threadId: busy.id, title: 'Came across' });
@@ -724,7 +722,7 @@ test("Peers: a thread that can't be taken in stays arriving, and one being hande
 
 // docs/protocol.md, "Who stopped it": his Stop on the phone says so; an agent's
 // interrupt_thread, which goes through the router, doesn't.
-test("only the phone's Stop counts as Mike's, not an agent's interrupt_thread", async () => {
+test("only the phone's Stop counts as Alex's, not an agent's interrupt_thread", async () => {
   const h = makeHarness();
   const ask = () => {
     const { thread } = h.runner.create({ text: 'go', cwd: h.cfg.defaults.cwd, accountId: 'claude-3', permissionMode: 'ask' });
@@ -880,7 +878,7 @@ test('an idle thread hibernating in words is kept by a drain that was not asked 
 // runner's tools left other runners' threads out.
 test('primaryRemote: a draining runner reaches other runners\' threads through the primary', async () => {
   const calls: Array<[string, Record<string, unknown>]> = [];
-  const rows = { runners: [{ id: 'cloud', name: 'Hetzner Cloud', online: true, lastSeenAt: '' }], threads: [{ threadId: 'ba5bb5ec-1', runnerId: 'cloud', title: 'Rust port' }] };
+  const rows = { runners: [{ id: 'cloud', name: 'Cloud box', online: true, lastSeenAt: '' }], threads: [{ threadId: 'ba5bb5ec-1', runnerId: 'cloud', title: 'Rust port' }] };
   const link = {
     call: async <T,>(method: string, params: Record<string, unknown> = {}): Promise<T> => {
       calls.push([method, params]);

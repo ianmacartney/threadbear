@@ -29,6 +29,7 @@ import { StuckJobs } from './stuck-jobs.ts';
 import { FrozenClis } from './frozen-cli.ts';
 import { KeepAwake } from './keep-awake.ts';
 import { experimentOn } from './experiments.ts';
+import { Reinstaller } from './reinstall.ts';
 import { MacScreen } from './mac-screen.ts';
 import { Projects, drainProjectMethods, projectMethods } from './projects.ts';
 import { Librarian, librarianMethods } from './librarian.ts';
@@ -194,7 +195,8 @@ async function main(): Promise<void> {
   const projectControl = () => projectRouter(projects, () => primaryLink, { draining: () => draining, holds: (threadId) => runner.has(threadId) });
   // Keeps both CLIs current (E). Its hooks call back into the runner and
   // the Restarter, made below; nothing calls them before start().
-  const acpBinary = (p: AcpProvider) => () => ACP_AGENTS[p].findBinary({ explicit: p === 'cursor' ? cfg.cursorPath : cfg.opencodePath, home: os.homedir(), pathEnv: process.env.PATH ?? '' });
+  const acpPaths: Record<AcpProvider, string | undefined> = { cursor: cfg.cursorPath, opencode: cfg.opencodePath, grok: cfg.grokPath };
+  const acpBinary = (p: AcpProvider) => () => ACP_AGENTS[p].findBinary({ explicit: acpPaths[p], home: os.homedir(), pathEnv: process.env.PATH ?? '' });
   const updates = new CliUpdates({
     cfg,
     log,
@@ -265,14 +267,14 @@ async function main(): Promise<void> {
     claudePath: cfg.claudePath,
     registry,
     log,
-    mcpServersFor: (threadId) => ({ [SERVER_NAME]: threadbearMcpServer(router(), threadId, scheduleControl(), projectControl(), appRestarts, () => cfg.bulletReplies, pocketControl, () => cfg.oneReply, () => cfg.connectorsUrl, gatewayHealth, remoteControl, () => experimentOn(cfg.home, 'runAsks')) }),
+    mcpServersFor: (threadId) => ({ [SERVER_NAME]: threadbearMcpServer(router(), threadId, scheduleControl(), projectControl(), appRestarts, () => cfg.bulletReplies, pocketControl, () => cfg.oneReply, () => cfg.connectorsUrl, gatewayHealth, remoteControl) }),
     oneReply: () => cfg.oneReply,
     sandboxFor: (cwd) => sandboxFor(cfg.sandbox, cwd),
     alwaysAsk: ALWAYS_ASK_TOOLS,
     neverAsk: NEVER_ASK_TOOLS,
   });
   // The threadbear tools for an agent that isn't given them in-process.
-  const codexStyleTools = (threadId: string) => buildThreadbearTools(router(), threadId, Date.now, scheduleControl(), projectControl(), appRestarts, { provider: 'codex', bulletReplies: () => cfg.bulletReplies, oneReply: () => cfg.oneReply, pocket: pocketControl, gateway: () => cfg.connectorsUrl, gatewayHealth, remote: remoteControl, runAsks: () => experimentOn(cfg.home, 'runAsks') });
+  const codexStyleTools = (threadId: string) => buildThreadbearTools(router(), threadId, Date.now, scheduleControl(), projectControl(), appRestarts, { provider: 'codex', bulletReplies: () => cfg.bulletReplies, oneReply: () => cfg.oneReply, pocket: pocketControl, gateway: () => cfg.connectorsUrl, gatewayHealth, remote: remoteControl });
   // One app-server per live Codex thread, each starting what E says is
   // current, with the same threadbear tools as dynamic tools.
   const codex = new CodexAdapter({
@@ -296,6 +298,7 @@ async function main(): Promise<void> {
         log,
         toolsFor: codexStyleTools,
         extraGuidance: () => RICH_BLOCKS_LINE,
+        dataDir: cfg.home,
       }),
     ]),
   );
@@ -307,7 +310,7 @@ async function main(): Promise<void> {
     settings: () => cfg.models,
     claudePath: cfg.claudePath,
     registry,
-    askers: Object.fromEntries(ACP_PROVIDERS.filter((p) => PROVIDER_INFO[p].smallJobs).map((p) => [p, acpAsker({ agent: ACP_AGENTS[p], binary: acpBinary(p), registry, log })])),
+    askers: Object.fromEntries(ACP_PROVIDERS.filter((p) => PROVIDER_INFO[p].smallJobs).map((p) => [p, acpAsker({ agent: ACP_AGENTS[p], binary: acpBinary(p), registry, log, dataDir: cfg.home })])),
     poolHost: { pool: (id) => runner.smallModelPool(id), ranDry: (id) => runner.noteRanDry(id) },
   });
   const projects = new Projects({ home: cfg.home, clock: realClock, log });
@@ -419,13 +422,14 @@ async function main(): Promise<void> {
     log,
     elsewhere: (id) => peers.owns(id) || peers.isArriving(id),
     folderElsewhere: (id) => peers.find(id)?.cwd,
-    sendElsewhere: (id, text, scheduleId, run, since) => sendScheduled(runner, peers, id, text, scheduleId, run, since),
+    sendElsewhere: (id, text, scheduleId, run, since, preserve) => sendScheduled(runner, peers, id, text, scheduleId, run, since, preserve),
     self: { id: syncRunnerId, name: cfg.sync.name ?? defaultRunnerName(), icon: runnerIcon, version: RUNNER_VERSION, release: RELEASE.release, startedAt },
     syncOn: Boolean(cfg.sync.enabled && cfg.sync.url && readSyncKey(cfg.home)),
   });
   if (!copyOfReal) scheduler.start();
   // The done card's loose ends list the check-ins booked for a thread.
   runner.schedulesFor = (id) => scheduler.list(id);
+  runner.scheduleChecks = () => scheduler.localChecks();
   // Projects need the threads loaded (their counts, and the thread side of
   // membership); the librarian needs both.
   projects.start(runner);
@@ -693,6 +697,25 @@ async function main(): Promise<void> {
     restart: (p) => restarter.request({ when: 'idle', ...p }),
     pendingRestart: () => Boolean(restarter.status().pendingRestart),
     followsOrigin: () => followOriginOn(cfg.home),
+    onChange: () => {
+      // updaterReady: the first onChange can come before the reinstaller exists.
+      if (updaterReady) reinstaller.consider();
+      publishUpdates();
+    },
+  });
+  // The LaunchAgent updating itself when it's behind main (reinstall.ts):
+  // the Updates panel's Update it, or by itself with selfReinstall on.
+  const reinstaller = new Reinstaller({
+    home: cfg.home,
+    checkout: updateRelease?.checkout,
+    clock: realClock,
+    log,
+    behind: () => {
+      const u = updater.status();
+      return u.launcherChanged && u.launcherReason && u.launcherKey ? { reason: u.launcherReason, key: u.launcherKey } : undefined;
+    },
+    auto: () => experimentOn(cfg.home, 'selfReinstall'),
+    recheck: () => updater.recheckLauncher(),
     onChange: () => publishUpdates(),
   });
   // Mike's releases for a fork, and on Mike's own runner the tagging of
@@ -822,6 +845,12 @@ async function main(): Promise<void> {
     if (u.reason) out.reason = u.reason;
     if (u.launcherChanged) out.launcherChanged = true;
     if (u.launcherReason) out.launcherReason = u.launcherReason;
+    if (u.checkout) out.checkout = u.checkout;
+    // This runner's reinstall stages (stops nothing), so the app can say so;
+    // one from 14 Nov waited for idle and reinstalled.
+    if (u.launcherChanged) out.launcherStages = true;
+    const reinstall = reinstaller.status();
+    if (reinstall) out.reinstall = reinstall;
     if (u.followProblem) out.followProblem = u.followProblem;
     const webRuntimeProblem = webRuntimeUpdates.problem();
     if (webRuntimeProblem) out.webRuntimeProblem = webRuntimeProblem;
@@ -856,6 +885,8 @@ async function main(): Promise<void> {
   };
   // tb updates (docs/protocol.md, "Mike's releases").
   methods['upstream.status'] = () => ({ upstream: upstream.status() });
+  // The Updates panel's Update it (docs/protocol.md, "Runner updates").
+  methods['runner.reinstall'] = () => ({ reinstall: reinstaller.request() ?? null });
   // Other runners' threads, for the Mac app's sidebar (step 6 part 2).
   // `forTools`: a draining runner's agent tools (handover.ts primaryRemote),
   // given what this runner's own tools get, the wait for the rows included.
@@ -1194,6 +1225,7 @@ async function main(): Promise<void> {
   const cancelMarkGood = markGoodLater(cfg.home, RELEASE.release, log, process.env, () => {
     restarter.proven();
     updater.start();
+    reinstaller.consider();
     upstream.start();
     swiftChanges.start();
   });
@@ -1216,6 +1248,8 @@ async function main(): Promise<void> {
   // now: waking one starts its CLI, whose tools need what's set up above.
   runner.holdWaits = false;
   step('reconcile waits', () => runner.reconcileWaits());
+  // Reports held for a thread whose threads finished while it was down.
+  step('held reports', () => runner.settleAllHeld());
   // Reviews a runner that went away owed (runner/lab-review.ts).
   step('owed reviews', () => runner.startOwedReviews());
 
@@ -1225,6 +1259,7 @@ async function main(): Promise<void> {
     stopping = true;
     cancelMarkGood();
     updater.stop();
+    reinstaller.stop();
     upstream.stop();
     swiftChanges.stop();
     stopHousekeeping();
@@ -1288,6 +1323,7 @@ async function main(): Promise<void> {
     try {
       cancelMarkGood();
       updater.stop();
+      reinstaller.stop();
       upstream.stop();
       swiftChanges.stop();
       stopHousekeeping();

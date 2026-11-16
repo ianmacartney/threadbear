@@ -205,20 +205,20 @@ test('view follows hibernate and den; cost is to the cent; working comes from ba
   const linked = toThreadDoc({
     ...base,
     actions: [
-      { id: 'x.site', title: 'Website', kind: 'url' as const, url: 'https://walkies.mikecann.app/', icon: 'safari', patch: 'x' },
+      { id: 'x.site', title: 'Website', kind: 'url' as const, url: 'https://walkies.example.app/', icon: 'safari', patch: 'x' },
       { id: 'x.asc', title: 'App Store Connect', kind: 'url' as const, url: 'https://appstoreconnect.apple.com/apps', iconFile: '/x/asc.png', patch: 'x' },
       { id: 'x.test', title: 'Test', kind: 'command' as const, command: 'npm test', patch: 'x' },
       { id: 'x.ask', title: 'Ask', kind: 'prompt' as const, prompt: 'Hi', patch: 'x' },
     ],
   }, 'r', now);
   assert.deepEqual(linked.links, [
-    { title: 'Website', url: 'https://walkies.mikecann.app/', icon: 'safari' },
+    { title: 'Website', url: 'https://walkies.example.app/', icon: 'safari' },
     { title: 'App Store Connect', url: 'https://appstoreconnect.apple.com/apps' },
   ]);
   assert.ok(!('links' in inbox));
   assert.ok(!('links' in forBackend(linked, LINKS_API_VERSION - 1, now)));
   assert.equal(forBackend(linked, LINKS_API_VERSION, now), linked);
-  // What Mike last said goes up for the phone's row, to a backend that takes it.
+  // What Alex last said goes up for the phone's row, to a backend that takes it.
   const asked = toThreadDoc({ ...base, asked: 'try the GPU route' }, 'r', now);
   assert.equal(asked.asked, 'try the GPU route');
   assert.ok(!('asked' in inbox));
@@ -562,6 +562,97 @@ test('the poster never follows a redirect, so the key never goes to another host
   }
 });
 
+test('the poster keeps safe network cause codes and never retries a failed save', async () => {
+  let attempts = 0;
+  const cause = Object.assign(new Error('connect private.example:443 with secret-value'), { code: 'ECONNRESET', address: '192.0.2.1' });
+  const failure = new TypeError('fetch failed', { cause });
+  const fake = (async () => { attempts++; throw failure; }) as typeof fetch;
+  await assert.rejects(convexPoster('https://x.convex.cloud', fake)('mutation', 'sync:saveSchedule', { key: 'secret-key', schedule: { text: 'private continuation' } }), (e: Error) => {
+    assert.equal(e.message, 'fetch failed (ECONNRESET)');
+    assert.equal(e.cause, failure);
+    assert.equal(String(e), 'Error: fetch failed (ECONNRESET)');
+    return true;
+  });
+  assert.equal(attempts, 1);
+});
+
+test('the poster reports aggregate network codes, with bounded traversal and no arbitrary cause text', async () => {
+  const nested = Object.assign(new Error('private cause'), { code: 'ETIMEDOUT' });
+  const aggregate = new AggregateError([
+    nested,
+    { code: 'ECONNREFUSED', message: 'private host' },
+    { code: 'ETIMEDOUT' },
+    { code: 'SECRET_VALUE' },
+  ], 'private aggregate');
+  const failure = new TypeError('fetch failed', { cause: aggregate });
+  Object.assign(nested, { cause: failure });
+  const fake = (async () => { throw failure; }) as typeof fetch;
+  await assert.rejects(convexPoster('https://x.convex.cloud', fake)('mutation', 'sync:saveSchedule', { key: 'secret-key' }), { message: 'fetch failed (ETIMEDOUT, ECONNREFUSED)' });
+});
+
+test('the poster preserves failures without known network codes and backend refusal data', async () => {
+  for (const failure of [new TypeError('fetch failed'), new Error('fetch failed', { cause: { code: 'SECRET_VALUE', message: 'private' } })]) {
+    const fake = (async () => { throw failure; }) as typeof fetch;
+    await assert.rejects(convexPoster('https://x.convex.cloud', fake)('mutation', 'sync:saveSchedule', {}), (e) => e === failure);
+  }
+  const fake = (async () => new Response(JSON.stringify({ status: 'error', errorMessage: 'Not allowed', errorData: { kind: 'forbidden' } }))) as typeof fetch;
+  await assert.rejects(convexPoster('https://x.convex.cloud', fake)('mutation', 'sync:saveSchedule', {}), (e: Error & { data?: unknown }) => {
+    assert.equal(e.message, 'Not allowed');
+    assert.deepEqual(e.data, { kind: 'forbidden' });
+    return true;
+  });
+});
+
+test('network diagnostics stop at a bounded cause depth and code count', async () => {
+  let cause: unknown = { code: 'ECONNRESET' };
+  for (let i = 0; i < 20; i++) cause = { cause };
+  const deep = new TypeError('fetch failed', { cause });
+  const fake = (async () => { throw deep; }) as typeof fetch;
+  await assert.rejects(convexPoster('https://x.convex.cloud', fake)('query', 'sync:runnersList', {}), (e) => e === deep);
+
+  const many = new TypeError('fetch failed', { cause: new AggregateError([
+    { code: 'ECONNRESET', name: 'AbortError' }, { code: 'ENOTFOUND', name: 'TimeoutError' }, { code: 'ETIMEDOUT' }, { code: 'EPIPE' },
+  ]) });
+  const several = (async () => { throw many; }) as typeof fetch;
+  await assert.rejects(convexPoster('https://x.convex.cloud', several)('query', 'sync:runnersList', {}), { message: 'fetch failed (ECONNRESET, AbortError, ENOTFOUND)' });
+});
+
+test('a lost reply body reports its network cause without retrying or exposing response text', async () => {
+  let attempts = 0;
+  const failure = new TypeError('terminated', { cause: Object.assign(new Error('private host details'), { code: 'UND_ERR_SOCKET' }) });
+  const fake = (async () => {
+    attempts++;
+    return new Response(new ReadableStream({ start(c) {
+      c.enqueue(new TextEncoder().encode('private response text'));
+      c.error(failure);
+    } }));
+  }) as typeof fetch;
+  await assert.rejects(convexPoster('https://x.convex.cloud', fake)('mutation', 'sync:saveSchedule', { key: 'secret-key' }), { message: "Couldn't read the Convex reply (HTTP 200) (UND_ERR_SOCKET)" });
+  assert.equal(attempts, 1, 'a lost reply may follow a committed write');
+  const malformed = (async () => new Response('private invalid JSON response')) as typeof fetch;
+  await assert.rejects(convexPoster('https://x.convex.cloud', malformed)('mutation', 'sync:saveSchedule', {}), { message: "Couldn't read the Convex reply (HTTP 200)" });
+  for (const name of ['TimeoutError', 'AbortError']) {
+    const timed = (async () => new Response(new ReadableStream({ start(c) {
+      c.error(new DOMException('private timeout details', name));
+    } }))) as typeof fetch;
+    await assert.rejects(convexPoster('https://x.convex.cloud', timed)('mutation', 'sync:saveSchedule', {}), { message: `Couldn't read the Convex reply (HTTP 200) (${name})` });
+  }
+});
+
+test('malformed network causes cannot replace the original failure with private text', async () => {
+  const { proxy, revoke } = Proxy.revocable({}, {});
+  revoke();
+  for (const cause of [
+    { get code() { throw new Error('private getter text'); } },
+    { errors: proxy },
+    { errors: Object.assign([], { slice() { throw new Error('private slice text'); } }) },
+  ]) {
+    const failure = new TypeError('fetch failed', { cause });
+    const fake = (async () => { throw failure; }) as typeof fetch;
+    await assert.rejects(convexPoster('https://x.convex.cloud', fake)('mutation', 'sync:saveSchedule', {}), (e) => e === failure);
+  }
+});
+
 test('the poster refuses a URL that would send the key in the clear, before any fetch', async () => {
   let fetched = 0;
   const fake = (async () => {
@@ -664,8 +755,6 @@ function setupFull(opts: { heads?: { threadId: string; lastSeq: number }[]; take
         applied.push(`press ${id} ${buttonId}`);
         return h.runner.pressButton(id, buttonId);
       },
-      // As handover.ts's phoneCommands has it: where the thread is now.
-      listButtons: (id) => h.runner.listButtons(id),
       schedule: (p) => {
         applied.push(`schedule ${p.scheduleId} ${p.action}`);
       },
@@ -1456,7 +1545,7 @@ test('commands: a quickAsk is kept as a thread and finished with its id', async 
     {
       commandId: 'q1',
       kind: 'quickAsk',
-      args: { question: 'Which drive?', answer: 'CannMedia.', sources: [{ title: 'Notes', url: 'https://x.example/1' }, { nope: 1 }], askedAt: 5 },
+      args: { question: 'Which drive?', answer: 'MediaDrive.', sources: [{ title: 'Notes', url: 'https://x.example/1' }, { nope: 1 }], askedAt: 5 },
       createdAt: 1,
     },
     { commandId: 'q2', kind: 'quickAsk', args: { question: 'no answer' }, createdAt: 2 },
@@ -1560,7 +1649,7 @@ test("a login's note waits for a backend that takes it, and goes up then", async
   sync.start();
   await sync.flushNow();
   const at = '2026-11-13T02:00:00.000Z';
-  const text = 'Moved to mike@example.org: mike@example.net hit its 5-hour limit.';
+  const text = 'Moved to alex@example.org: alex@example.net hit its 5-hour limit.';
   const inner = sync as never as { appendMessages(m: MessageDoc[]): Promise<void>; sawBackend(r: unknown): void };
   await inner.appendMessages([
     { threadId: t, seq: 910, role: 'note', text, at },
@@ -1628,7 +1717,7 @@ test('toMessageDoc keeps text and tool calls, nothing else, and a schedule origi
 
 import { pushText, PUSH_BODY_CHARS } from '../../../convex/pushText.ts';
 
-test('pushText says why the thread needs Mike: the question, the approval, or the reply', () => {
+test('pushText says why the thread needs Alex: the question, the approval, or the reply', () => {
   const base = { title: 'Fix the dock badge', status: 'idle', preview: 'Done, the badge clears when you open the thread.' };
   assert.deepEqual(pushText(base), { title: 'Fix the dock badge', body: 'Done, the badge clears when you open the thread.' });
   assert.deepEqual(pushText({ ...base, status: 'waiting', pendingApproval: { kind: 'approval', name: 'Bash', title: 'Run a command', inputSummary: 'npm test' } }), { title: 'Fix the dock badge', body: 'Run a command: npm test' });
@@ -1972,7 +2061,7 @@ test('sharing: the row carries share, "off" included, once the backend takes it'
   const slug = h.runner.get(a.id).share!.slug;
   assert.deepEqual(docs().filter((d) => d.threadId === a.id).at(-1)!.share, { access: 'link', slug });
 
-  // "off" goes up too, so Mike's page for the link keeps its controls.
+  // "off" goes up too, so Alex's page for the link keeps its controls.
   h.runner.share(a.id, { access: 'off' });
   h.clock.advance(SYNC_COALESCE_MS);
   await tick(20);
@@ -2142,7 +2231,7 @@ test('schedules: a backend of API 9 gets the scheduler attached, and schedules s
   assert.equal(attached.length, 0, 'an older backend keeps them in the file');
   await old.sync.stop();
 
-  const answers: Record<string, unknown> = { 'sync:heartbeat': { apiVersion: SCHEDULES_API_VERSION }, 'sync:claimSchedule': true, 'sync:runnersList': [{ runnerId: 'r2', name: 'bruce', lastSeenAt: 5, version: '0.4.0', startedAt: 's', draining: false, threadCount: 3 }] };
+  const answers: Record<string, unknown> = { 'sync:heartbeat': { apiVersion: SCHEDULES_API_VERSION }, 'sync:claimSchedule': true, 'sync:runnersList': [{ runnerId: 'r2', name: 'mac-mini', lastSeenAt: 5, version: '0.4.0', startedAt: 's', draining: false, threadCount: 3 }] };
   const f = setup({ answer: (fn) => answers[fn] ?? null, schedules: { attach: (b) => void attached.push(b), inBackend: () => inBackend } });
   f.sync.start();
   await tick();
@@ -2152,7 +2241,7 @@ test('schedules: a backend of API 9 gets the scheduler attached, and schedules s
   const claim = f.calls.find((c) => c.fn === 'sync:claimSchedule')!;
   assert.deepEqual({ ...claim.args, holder: undefined }, { key: 'k', runnerId: 'r1', scheduleId: 's1', holder: undefined, kind: 'due', expect: '2026-10-27T03:00:00.000Z' });
   assert.match(String(claim.args.holder), /^r1:\d+:2026-10-27T00:00:00.000Z$/);
-  assert.deepEqual(await b.runners(), [{ id: 'r2', name: 'bruce', lastSeenAt: 5, version: '0.4.0', startedAt: 's' }]);
+  assert.deepEqual(await b.runners(), [{ id: 'r2', name: 'mac-mini', lastSeenAt: 5, version: '0.4.0', startedAt: 's' }]);
   await b.save({ id: 's9', runnerId: 'r2', title: 't', text: 'x', whenText: 'Every day at 0:00', cron: '@daily', paused: false, createdAt: 'c', updatedAt: 'u', runs: 0 });
   assert.deepEqual(f.calls.find((c) => c.fn === 'sync:saveSchedule')!.args.schedule, { id: 's9', runnerId: 'r2', title: 't', text: 'x', whenText: 'Every day at 0:00', paused: false, createdAt: 'c', updatedAt: 'u', runs: 0, cron: '@daily' });
 
@@ -2266,7 +2355,7 @@ test('end-of-turn cards: next steps come from the last turn.completed while the 
   await sync.flushNow();
   const rows = () => calls.filter((c) => c.fn === 'sync:upsertThreads').flatMap((c) => c.args.threads as ThreadDoc[]).filter((d) => d.threadId === 'tn');
   assert.deepEqual(rows().at(-1)?.next, ['Ship it']);
-  // Mike replied: the turn's next steps aren't the last word any more.
+  // Alex replied: the turn's next steps aren't the last word any more.
   events = [...events, { seq: 7, ts, threadId: 'tn', type: 'user.message', text: 'go', images: [] }];
   summary = { ...thread, lastSeq: 7, status: 'running' as never };
   assert.equal(toThreadDoc(summary, 'r1', 0).next, undefined);
@@ -2298,7 +2387,7 @@ test('commands: a photo from the phone reaches the transcript and the inbox copy
 });
 
 // The main Mac sends pictures to this runner's threads the phone's way
-// (backend API 63, relay.ts withPictures): fetched the same, but Mike's
+// (backend API 63, relay.ts withPictures): fetched the same, but Alex's
 // message from a Mac, not marked as the phone's.
 test('commands: pictures sent from the main Mac reach the transcript as his own message', async () => {
   const { h, sync, push, calls } = setupFull();
@@ -3269,7 +3358,7 @@ test('a key the backend turns down is said once, plainly, and a new key on disk 
 });
 
 // Moving a runner onto its own key while the main key still works (as
-// Bruce was): its old main-key heartbeat is refused as forbidden, not
+// Mac mini was): its old main-key heartbeat is refused as forbidden, not
 // turned down, and it should still restart onto the new key on disk.
 test('a forbidden heartbeat with a new key on disk restarts onto it too', async () => {
   const forbidden = () => Object.assign(new Error('forbidden'), { data: { kind: 'forbidden', message: "This runner's key can't act as runner r1 with the main key, as that runner has a key of its own." } });
@@ -3329,9 +3418,9 @@ test('runners.stats marks the figures wanted at most every 20 s, and is empty wh
 // four runners, 6 Nov), and a poll costs the same whatever they write.
 test("other runners' usage readings are read now, then every five minutes, without this runner's own, until sync stops", async () => {
   const got: unknown[][] = [];
-  const reading = (runnerId: string) => ({ runnerId, provider: 'claude', email: 'mike@example.net', usage: { windows: [], readAt: '2026-11-06T00:00:00.000Z', source: 'live' } });
+  const reading = (runnerId: string) => ({ runnerId, provider: 'claude', email: 'alex@example.net', usage: { windows: [], readAt: '2026-11-06T00:00:00.000Z', source: 'live' } });
   const { h, sync, calls } = setup({
-    answer: (fn) => (fn === 'sync:heartbeat' ? { apiVersion: BACKEND_API_VERSION } : fn === 'sync:sharedUsage' ? [reading('r1'), reading('bruce')] : null),
+    answer: (fn) => (fn === 'sync:heartbeat' ? { apiVersion: BACKEND_API_VERSION } : fn === 'sync:sharedUsage' ? [reading('r1'), reading('mac-mini')] : null),
     extra: { sharedUsage: { setShared: (rows) => got.push(rows) } },
   });
   const reads = () => calls.filter((c) => c.fn === 'sync:sharedUsage');
@@ -3344,7 +3433,7 @@ test("other runners' usage readings are read now, then every five minutes, witho
   assert.equal(reads().length, 1);
   assert.equal(reads()[0]!.kind, 'query');
   assert.equal(reads()[0]!.args.runnerId, 'r1');
-  assert.deepEqual(got.at(-1)!.map((r) => (r as { runnerId: string }).runnerId), ['bruce'], "this runner's own left out");
+  assert.deepEqual(got.at(-1)!.map((r) => (r as { runnerId: string }).runnerId), ['mac-mini'], "this runner's own left out");
   // Heartbeats in between don't start a second timer or read again.
   h.clock.advance(HEARTBEAT_MS * 2);
   await tick(20);
@@ -3427,7 +3516,7 @@ test('asking another runner: the phone gets a card it can only read, and allow n
   assert.match(String(failed.args.note), /main Mac/);
   assert.equal(h.runner.get(t.id).status, 'waiting');
   // The main Mac started it and marked the row; its allow goes through.
-  row = { status: 'started', runnerId: 'm5', runnerName: 'M5', threadId: 'new-thread' };
+  row = { status: 'started', runnerId: 'laptop', runnerName: 'Laptop', threadId: 'new-thread' };
   push([{ commandId: 'q2', kind: 'respond', threadId: t.id, args: { approvalId: 'req-0001-abcd', decision: 'allow' }, createdAt: 2 }] as Command[]);
   await tick(10);
   assert.deepEqual(await answer, row);
@@ -3835,66 +3924,6 @@ test("commands: a page asked for while a row sharing the thread is on its way wa
   release!();
   await flushing;
   await sync.stop();
-});
-
-// Daybreak, 10 Nov (finding 61): a card's Run is pressed by its id alone, so
-// it runs the command on this Mac, never what the phone showed. Comment lines
-// dressed as a PEM key around a statement were scrubbed out of the row, and
-// Run ran the statement. Now a Run the scrub would change goes up without its
-// button, and a press from off the Mac is refused all the same.
-import { REMOTE_RUN_REFUSED } from '../../src/tools.ts';
-import { RUN_ASKS_API_VERSION, toPhoneAsk } from '../../src/sync.ts';
-const HIDDEN_RUN = "printf 'Health check OK\\n'\n# -----BEGIN PRIVATE KEY-----\ntouch hidden-execution.txt\n# -----END PRIVATE KEY-----";
-
-test("a card's Run the scrub would change goes up without its button, and a press from the phone is refused", async () => {
-  const { h, sync, calls, push, applied } = setupFull({ apiVersion: RUN_ASKS_API_VERSION });
-  sync.start();
-  await sync.flushNow();
-  fs.writeFileSync(path.join(h.cfg.home, 'runner.json'), JSON.stringify({ ...readRunnerJson(h.cfg.home), experiments: { runAsks: true } }));
-  const t = h.runner.create({ text: 'Health', cwd: h.cfg.defaults.cwd, accountId: 'claude-3', permissionMode: 'ask' }).thread;
-  const s = session(h, t.id);
-  s.init();
-  s.result('completed');
-  await tick();
-  const st = (h.runner as any).threads.get(t.id);
-  const asks = h.runner.armRunAsks(st, [{ action: 'Check health?', why: 'It prints OK.', run: { command: HIDDEN_RUN } }, { action: 'List it?', run: { command: 'ls -la' } }], 'turn_x');
-  st.rec.needs = { seq: st.rec.lastTurnCompletedSeq, needs: 'you', asks };
-  h.runner.update({ threadId: t.id, title: 'Health check' });
-  h.clock.advance(SYNC_COALESCE_MS);
-  await tick();
-  const rows = calls.filter((c) => c.fn === 'sync:upsertThreads').flatMap((c) => c.args.threads as ThreadDoc[]).filter((d) => d.threadId === t.id && d.asks);
-  const up = rows.at(-1)!.asks!;
-  assert.equal(up[0]!.run, undefined, 'no button for what the phone would show scrubbed');
-  assert.equal(up[0]!.why, `It prints OK. ${REMOTE_RUN_REFUSED}`);
-  assert.ok(!JSON.stringify(up).includes(asks[0]!.run!.buttonId!), 'its id never goes up');
-  assert.equal(up[1]!.run?.command, 'ls -la', 'one that shows whole keeps its Run');
-  assert.equal(up[1]!.run?.buttonId, asks[1]!.run!.buttonId);
-
-  // The id sent anyway (a phone or backend that kept it): refused before the runner.
-  push([{ commandId: 'r1', kind: 'press', threadId: t.id, args: { buttonId: asks[0]!.run!.buttonId }, createdAt: 1 }]);
-  await tick(10);
-  const r1 = calls.find((c) => c.fn === 'sync:finishCommand' && c.args.commandId === 'r1')!;
-  assert.equal(r1.args.ok, false);
-  assert.match(String(r1.args.note), /can only be run in the Mac app/);
-  assert.deepEqual(applied.filter((a) => a.startsWith('press')), []);
-  assert.ok(!fs.existsSync(path.join(h.cfg.defaults.cwd, 'hidden-execution.txt')));
-  // The whole one still presses from the phone.
-  push([{ commandId: 'r2', kind: 'press', threadId: t.id, args: { buttonId: asks[1]!.run!.buttonId }, createdAt: 2 }]);
-  await tick(10);
-  assert.deepEqual(applied.filter((a) => a.startsWith('press')), [`press ${t.id} ${asks[1]!.run!.buttonId}`]);
-  await sync.stop();
-});
-
-test("a Run is checked against the runner's own scrub: a value it knows, in the command or its folder, holds it on the Mac", () => {
-  const scrubber = new Scrubber({ env: {}, folders: false });
-  scrubber.known.add('Zq9vLm2Xw8Kp4Rt7');
-  const ask = (command: string, cwd = '/w') => toPhoneAsk({ action: 'Go?', run: { command, cwd, buttonId: 'abcd1234' } }, scrubber.safeText);
-  assert.equal(ask('deploy --token Zq9vLm2Xw8Kp4Rt7').run, undefined);
-  assert.equal(ask('ls', '/w/Zq9vLm2Xw8Kp4Rt7').run, undefined);
-  assert.equal(ask(HIDDEN_RUN).run, undefined);
-  assert.equal(ask('ls').run?.buttonId, 'abcd1234');
-  // A scrub that fails holds it too.
-  assert.equal(toPhoneAsk({ action: 'Go?', run: { command: 'ls', cwd: '/w', buttonId: 'abcd1234' } }, () => { throw new Error('boom'); }).run, undefined);
 });
 
 import { LOOSE_ENDS_API_VERSION } from '../../src/sync.ts';

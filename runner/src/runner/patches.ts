@@ -11,7 +11,7 @@ import { Projects } from '../projects.ts';
 import { threadEnv } from '../restart.ts';
 import { paths } from '../config.ts';
 import { isDirectory } from '../fsutil.ts';
-import { commandFiles, commandFilesOutside, isPatchFile, namedPaths, patchHash, scanModule, type ClaudeVerdict, type PatchHash } from '../patch-trust.ts';
+import { checkReach, commandFiles, commandFilesOutside, isPatchFile, namedPaths, patchHash, scanModule, type ClaudeVerdict, type PatchHash } from '../patch-trust.ts';
 import type { AgentWrite } from '../adapters/types.ts';
 import { CLAUDE_PATCH_ID, claudeCommands, claudeOptions, settingsCommands, settingsNamedPaths, type ClaudeOptions } from '../claude-trust.ts';
 import { canonicalPath, runsAsCodeByName, type CodeWrite } from '../code-writes.ts';
@@ -586,6 +586,21 @@ export const patchesPart = {
       }
       const found = claudeCommands(cwd, home);
       if (found && [...found.files, ...found.named].some(same)) return true;
+      // What a schedule's check on this runner reaches: it runs by itself,
+      // and its approval is a digest taken just before the shell opens the
+      // files, so an edit made after it (or between two runs) would run
+      // unasked (Daybreak 126, 15 Nov 2026). Read afresh each time, so a
+      // check added or changed counts at once. One that runs something
+      // that can't be followed makes every edit in its repo ask: what it
+      // runs there isn't known.
+      const checks = this.scheduleChecks?.() ?? [];
+      // A check the runner handing over is running, that doesn't say what.
+      let checkUnsure = (checks as { unknown?: boolean }).unknown === true;
+      for (const c of checks) {
+        const reach = checkReach(c.command, c.cwd);
+        if (reach.files.some(same)) return true;
+        if (reach.problem && isInside(real, canonicalPath(reach.top).toLowerCase())) checkUnsure = true;
+      }
       // Every patch folder the thread reads, as loadPatchSet does, its
       // projects' too, as their hooks run at the end of its turns: the ones
       // that load without a hash.
@@ -612,7 +627,7 @@ export const patchesPart = {
           if (scan.all) unsure ??= { patch: p, ...(scan.why ? { why: scan.why } : {}) };
         }
       }
-      if (!unsure) return false;
+      if (!unsure) return checkUnsure ? 'unsure' : false;
       this.noteEditsAsk(rec.id, unsure.patch, unsure.why);
       return 'unsure';
     } catch {
@@ -828,6 +843,15 @@ export const patchesPart = {
   // The threads a turn-end hook is running for, which a restart waits for.
   threadsWithHooksRunning(this: Runner): string[] {
     return [...this.threads.values()].filter((st) => st.rt.hooksRunning && !st.rt.deleted).map((st) => st.rec.id);
+  },
+
+  // The threads running a card's Run command or a patch action, or tearing
+  // down a worktree after archiving. A release restart doesn't wait for
+  // these (it hands over); a LaunchAgent reinstall (reinstall.ts) does, as
+  // it stops every runner at once, and shutting down doesn't wait for a
+  // teardown. Each has its own time limit.
+  threadsRunningActions(this: Runner): string[] {
+    return [...this.threads.values()].filter((st) => (st.rt.runningActions?.size && !st.rt.deleted) || st.rt.cleaning).map((st) => st.rec.id);
   },
 
   // The threads a restart waits for between turns: one going back to an

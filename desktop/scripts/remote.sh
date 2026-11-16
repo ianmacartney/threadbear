@@ -2,7 +2,10 @@
 # Runs a command from this checkout on another machine, so the Rust builds and
 # the spec runs stay off the Mac you're working on (AGENTS.md).
 #
-#   desktop/scripts/remote.sh <ssh host> [--desk] [--perf] -- <command...>
+#   desktop/scripts/remote.sh <ssh host> [--desk] [--perf] [--try] -- <command...>
+#
+# --try is for automatic updates: exit 75 instead of queueing behind this
+# checkout's run or either host lease, leaving queued measurements ahead.
 #
 # It copies the checkout, committed or not, less its build folders, to a folder
 # of its own under ~/.cache/threadbear-check/gpui there (so two checkouts at once
@@ -24,10 +27,16 @@ set -euo pipefail
 host="${1:?usage: remote.sh <ssh host> [--desk] [--perf] -- <command>}"; shift
 desk=0
 perf=0
+try_flag=""
+# An older remote.sh ignores this request and still builds normally. The
+# updater lives in the app bundle but this script comes from main, which can
+# be rolled back to a version from before --try existed.
+[ "${THREADBEAR_REMOTE_TRY:-}" != 1 ] || try_flag="--try "
 while [ $# -gt 0 ]; do
   case "$1" in
     --desk) desk=1; shift ;;
     --perf) perf=1; shift ;;
+    --try) try_flag="--try "; shift ;;
     --) shift; break ;;
     *) break ;;
   esac
@@ -61,16 +70,41 @@ target="$base/target-$key"
 # The folder is fixed, not TMPDIR, so every run from the checkout finds
 # the same file. perl for macOS, which has no flock command.
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/remote-guard-lib.sh"
+# Every ssh here (rsync's too) sends a keep-alive every 30 s and gives up after
+# 4 unanswered, so a connection that dies quietly fails in about 2 minutes. On
+# 14 Nov a network drop to Tinker Desk left a --desk --perf run sitting on a
+# dead connection after "Waiting for another build or measurement...", twice,
+# for over half an hour: the host had already ended its side, and with no
+# traffic this ssh never found out. scripts/check-remote.sh has the same.
+# An array, not a function: a background function is a subshell, and its $!
+# isn't the ssh the signal trap has to kill.
+SSH=(ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=4)
+# wait_run: waits for the background ssh, and says when it was ssh itself that
+# failed (255: the connection dropped, or never came up), so a drop doesn't
+# read as the lock wait or build step that was last printed.
+wait_run() {
+  local rc=0
+  wait "$ssh_pid" || rc=$?
+  ssh_pid=""
+  [ "$rc" != 255 ] || echo "remote.sh: lost the ssh connection to $host (ssh exited 255; a dropped connection fails within about 2 minutes). Whatever it last said it was doing, including waiting for a lock, didn't finish. The host stops its side when it sees the connection go. Run it again once $host answers." >&2
+  return "$rc"
+}
 ssh_pid=""
+lock_pid=""
 # The turn is kept until the host says the run has gone (30 s at most): the
 # guard there takes up to 5 s to stop a command that ignores TERM, and the
 # next run mustn't copy over its folder while it's still going (Codex's
 # review). [r] so the pgrep's own shell, whose command line has the pattern
 # in it, doesn't count. A host that can't be reached says nothing either way.
+# Every child of this script goes first, the turn's waiter among them even in
+# the moment before lock_pid is set. || true throughout: under set -e a kill
+# of one that has just exited would end the trap before its exit (Codex).
 on_signal() {
+  [ -z "$lock_pid" ] || kill "$lock_pid" 2>/dev/null || true
+  pkill -TERM -P $$ 2>/dev/null || true
   if [ -n "$ssh_pid" ]; then
-    kill "$ssh_pid" 2>/dev/null
-    ssh -o BatchMode=yes -o ConnectTimeout=5 "$host" \
+    kill "$ssh_pid" 2>/dev/null || true
+    "${SSH[@]}" -o BatchMode=yes -o ConnectTimeout=5 "$host" \
       "i=0; while pgrep -f '[r]un-$tag' >/dev/null && [ \$i -lt 60 ]; do sleep 0.5; i=\$((i + 1)); done" </dev/null >/dev/null 2>&1 || true
   fi
   exit "$1"
@@ -82,10 +116,32 @@ if [ "$(uname -s)" = Darwin ]; then turns="$HOME/Library/Caches/Threadbear"; els
 mkdir -p "$turns/remote"
 exec 9>>"$turns/remote/$key-$(printf '%s' "$host" | tr -c 'A-Za-z0-9.-' _).lock"
 waiting="Waiting for another remote.sh run from this checkout on $host to finish..."
+# The wait for the turn is a background child this waits for, like the run's
+# ssh: bash holds a trap until a foreground child ends, so a TERM while
+# another run held the turn went unanswered until that run finished (14 Nov,
+# d7aca215). The lock is the open file's, so the child taking it on fd 9
+# takes it for this script too, and it stays after the child exits.
+# turn_cmd <block>: the command that takes the turn, blocking or not (exit 1
+# if it's taken). Run directly, never through a function, so a background one's
+# $! is the flock or perl itself, not a subshell above it that a kill would
+# leave it behind (Codex's review).
 if command -v flock >/dev/null 2>&1; then
-  flock -n 9 || { echo "$waiting" >&2; flock 9; }
+  turn_cmd() { if [ "$1" = 0 ]; then turn=(flock -n 9); else turn=(flock 9); fi; }
 else
-  WAITING="$waiting" perl -e 'use Fcntl ":flock"; open(my $f, ">&=", 9) or die "remote.sh: no lock file: $!\n"; flock($f, LOCK_EX | LOCK_NB) or do { print STDERR "$ENV{WAITING}\n"; flock($f, LOCK_EX) or die "remote.sh: lock: $!\n" }'
+  turn_cmd() { turn=(perl -e 'use Fcntl ":flock"; open(my $f, ">&=", 9) or die "remote.sh: no lock file: $!\n"; flock($f, $ARGV[0] ? LOCK_EX : LOCK_EX | LOCK_NB) or exit 1' "$1"); }
+fi
+turn_cmd 0
+if ! "${turn[@]}"; then
+  if [ -n "$try_flag" ]; then
+    echo "Another remote.sh run from this checkout is busy; deferring the update build." >&2
+    exit 75
+  fi
+  echo "$waiting" >&2
+  turn_cmd 1
+  "${turn[@]}" &
+  lock_pid=$!
+  wait "$lock_pid" || { echo "remote.sh: couldn't take the turn lock." >&2; exit 1; }
+  lock_pid=""
 fi
 
 # A checkout that hasn't been run for a few days gives its folders back: a
@@ -104,11 +160,15 @@ fi
 # guard files first: the worktree copy may not exist yet, or be queued for
 # eviction. No build or capture starts until the final whole-command turn.
 boot="$base/run-$tag-tools"
-ssh "$host" "mkdir -p $boot"
+# The helpers are written here and then run, so every folder down to them must
+# be this account's own and closed to others, or the run stops: a group with
+# write on the cache could otherwise swap one in between (Codex's review of
+# Daybreak 114/116, 13 Nov). A fresh boot folder each run, never one found there.
+"${SSH[@]}" "$host" "umask 077 && mkdir -p $base && for d in .cache ${base%/*} $base; do [ -d \$d ] && [ ! -L \$d ] && [ -O \$d ] && chmod go-w \$d || { echo \"remote.sh: ~/\$d on $host isn't a folder of this account's own\" >&2; exit 1; }; done && rm -rf $boot && mkdir -m 700 $boot"
 for helper in perf-lock.pl perf-children.pl hangup-guard.sh; do
-  ssh "$host" "cat > $boot/$helper" <"$root/scripts/$helper"
+  "${SSH[@]}" "$host" "cat > $boot/$helper" <"$root/scripts/$helper"
 done
-ssh "$host" "cat > $boot/trim-remote-cache.sh" <"$root/desktop/scripts/trim-remote-cache.sh"
+"${SSH[@]}" "$host" "cat > $boot/trim-remote-cache.sh" <"$root/desktop/scripts/trim-remote-cache.sh"
 # The age limit goes by the folder's own time, which a long run inside it
 # doesn't move: one with anything changed inside in the last 15 minutes (a
 # run's .in-use marker, perf-lock.pl's heartbeat) stays, as the trim's do
@@ -126,17 +186,21 @@ precopy="$old_target""mkdir -p $src $target; [ -e $target/.synced-by-content ] |
 cd \"\$HOME/$base\"
 bash \"\$HOME/$boot/trim-remote-cache.sh\" $key ${target##*/}"
 alive_stdin 7
-remote="env THREADBEAR_REMOTE_SOURCE=\"\$HOME/$src\" THREADBEAR_REMOTE_TARGET=\"\$HOME/$target\" THREADBEAR_REMOTE_TOOLS=\"\$HOME/$boot\" perl $boot/perf-lock.pl - bash -c $(single_quoted "$precopy")"
-ssh "$host" "$remote" <&7 &
+remote="env THREADBEAR_REMOTE_SOURCE=\"\$HOME/$src\" THREADBEAR_REMOTE_TARGET=\"\$HOME/$target\" THREADBEAR_REMOTE_TOOLS=\"\$HOME/$boot\" perl $boot/perf-lock.pl ${try_flag}- bash -c $(single_quoted "$precopy")"
+"${SSH[@]}" "$host" "$remote" <&7 &
 ssh_pid=$!
 rc=0
-wait "$ssh_pid" || rc=$?
-ssh_pid=""
+wait_run || rc=$?
 if [ "$rc" = 9 ]; then
   echo "Couldn't mark this checkout's copy on $host to build again, so it may hold a stale build. Not running." >&2
   exit 1
 fi
-[ "$rc" = 0 ] || exit "$rc"
+if [ "$rc" != 0 ]; then
+  # A deferred attempt has only uploaded its own helpers. Give those back
+  # now rather than accumulate a tools folder at every five-minute retry.
+  [ "$rc" != 75 ] || "${SSH[@]}" "$host" "rm -rf $boot" </dev/null || true
+  exit "$rc"
+fi
 # Named by hand, not read from .gitignore: rsync takes those rules from the
 # receiving side when it decides what to delete, which removed part of a
 # Swift build and a node_modules here on 9 Nov.
@@ -149,7 +213,7 @@ fi
 # passed on stale code (11 Nov, thread 699f31d2). Unchanged files keep their
 # time, so they don't rebuild. desktop/scripts/test-remote-freshness.sh <host>
 # plays that case.
-rsync -rlpDcz --delete --exclude .git --exclude node_modules --exclude .build --exclude target --exclude reports \
+rsync -rlpDcz -e "${SSH[*]}" --delete --exclude .git --exclude node_modules --exclude .build --exclude target --exclude reports \
   --exclude .fixtures --exclude .swiftpm --exclude dist --exclude DerivedData --exclude .DS_Store \
   "$root/" "$host:$src/"
 
@@ -242,16 +306,21 @@ $postlude"
 # Named by this run alone: a stopped --desk run's .gone file stays there (the
 # guard's comment says why) until the clear-out above, half a day on.
 script="$base/run-$tag.sh"
-ssh "$host" "cat > $script" <<<"$run"
+"${SSH[@]}" "$host" "cat > $script" <<<"$run"
 alive_stdin 7
+# What a run waiting for the host's perf lock is told the holder is running
+# (perf-lock.pl's holder note): the checkout's folder, which names the thread's
+# slot, and the command.
+label="remote.sh from $(basename "$root")$([ "$desk" = 1 ] && printf ' --desk' || true): $*"
+label="THREADBEAR_PERF_LOCK_LABEL=$(single_quoted "${label:0:200}")"
 if [ "$desk" = 1 ]; then
   pidfile="$base/run-$tag.pid"
-  remote="env THREADBEAR_REMOTE_SOURCE=\"\$HOME/$src\" THREADBEAR_REMOTE_TARGET=\"\$HOME/$target\" perl $src/scripts/perf-lock.pl --desk $pidfile bash $script $pidfile"
+  remote="env $label THREADBEAR_REMOTE_SOURCE=\"\$HOME/$src\" THREADBEAR_REMOTE_TARGET=\"\$HOME/$target\" perl $src/scripts/perf-lock.pl ${try_flag}--desk $pidfile bash $script $pidfile"
 else
-  remote="env THREADBEAR_REMOTE_SOURCE=\"\$HOME/$src\" THREADBEAR_REMOTE_TARGET=\"\$HOME/$target\" perl $src/scripts/perf-lock.pl - bash $script"
+  remote="env $label THREADBEAR_REMOTE_SOURCE=\"\$HOME/$src\" THREADBEAR_REMOTE_TARGET=\"\$HOME/$target\" perl $src/scripts/perf-lock.pl ${try_flag}- bash $script"
 fi
-ssh "$host" "$remote; rc=\$?; rm -f $script; rm -rf $boot; exit \$rc" <&7 &
+"${SSH[@]}" "$host" "$remote; rc=\$?; rm -f $script; rm -rf $boot; exit \$rc" <&7 &
 ssh_pid=$!
 rc=0
-wait "$ssh_pid" || rc=$?
+wait_run || rc=$?
 exit "$rc"

@@ -834,6 +834,8 @@ impl Threadbear {
                 self.sidebar_settings_changed(cx);
             }
         }
+        // A nested thread's group opens so its row is there to see.
+        self.open_group_of(id, cx);
         self.mode = SidebarMode::Inbox;
         // Its row in view, wherever the list was scrolled to.
         self.reveal_row(id, cx);
@@ -1200,7 +1202,14 @@ impl Threadbear {
 
     /// The window's title (Window menu, Mission Control), as `windowTitle`.
     pub(crate) fn sync_window_title(&mut self, window: &mut Window) {
-        let title = self.main_panel_title();
+        let mut title = self.main_panel_title();
+        // A scripted copy anyone can see says so wherever macOS names the
+        // window (Mission Control, the Window menu, Activity Monitor's
+        // windows): someone running a fork found one with the mock's demo
+        // threads and took it for a leak of someone's real setup (15 Nov).
+        if crate::scripted::labelled() {
+            title.push_str(crate::scripted::TITLE_LABEL);
+        }
         if title != self.last_window_title {
             window.set_window_title(&title);
             self.last_window_title = title;
@@ -1426,6 +1435,10 @@ impl Threadbear {
 
     pub(crate) fn render_shell(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Stateful<Div> {
         self.sync_window_title(window);
+        // The layer the sidebar's arcs turn in (spinner.rs), which looks at
+        // the dock to see when the Threads panel isn't in front.
+        let (dock, dock_view) = (self.dock.clone(), self.dock_view.clone());
+        let arc_layer = self.arc_layer.get_or_insert_with(|| cx.new(|_| crate::spinner::ArcLayer::new(dock, dock_view, THREADS))).clone();
         // With nothing focused GPUI's key dispatch doesn't reach this element's
         // key context or actions, so the shell keeps the keyboard when nothing
         // else has it (no thread open, a closed dialog).
@@ -1461,6 +1474,9 @@ impl Threadbear {
             .when_some(rail, |s, r| s.child(r))
             // An archived or hibernated thread's page on its way to its
             // heading, over the sidebar and the panel alike (archive_flight.rs).
+            // The sidebar's turning arcs, drawn here so a turn doesn't
+            // redraw the sidebar (spinner.rs).
+            .child(div().absolute().top_0().left_0().size_full().child(arc_layer))
             .child(self.flight.overlay(cx))
             .children(self.render_swipe_card(cx).map(|card| deferred(card).with_priority(1)))
             // The tour and the pages' intros, over everything (tour.rs).
