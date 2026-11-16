@@ -295,5 +295,9 @@ fn fixed_apps_start_only_once_signed_and_icons_never_ask_launch_services() {
     assert!(!gate.contains("URLForApplicationWithBundleIdentifier(&NSString::from_str(threadbear_core::reply_links::CHROME_BUNDLE_ID))"), "Chrome by id, not the running one");
     let simulator = gate.split("fn apple_simulator(").nth(1).unwrap().split("\n}\n").next().unwrap();
     assert!(simulator.contains("signed_as(path, \"anchor apple and identifier"));
+    let zed = gate.split("fn open_thread_in_zed(").nth(1).unwrap().split("\n}\n").next().unwrap();
+    let check = zed.find("signed_as(&path, ZED)").expect("Zed is checked");
+    assert!(check < zed.find("Command::new(real.join(").expect("the checked Zed is the one started"), "checked before it's started");
+    assert!(gate.contains("certificate leaf[subject.OU] = \\\"MQ55VZLNZQ\\\""), "Zed Industries' team");
     assert_eq!(gate.matches("Command::new(\"/usr/bin/open\")").count(), 1, "one place starts an application by path");
 }
