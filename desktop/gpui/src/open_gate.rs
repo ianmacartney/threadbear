@@ -208,9 +208,6 @@ fn installed_where_apps_are(real: &Path) -> bool {
 const GOOGLE_CHROME: &str = "anchor apple generic and identifier \"com.google.Chrome\" and certificate leaf[subject.OU] = \"EQHXZ8M8AV\"";
 
 #[cfg(target_os = "macos")]
-const ZED: &str = "anchor apple generic and identifier \"dev.zed.Zed\" and certificate leaf[subject.OU] = \"MQ55VZLNZQ\"";
-
-#[cfg(target_os = "macos")]
 fn start_chrome_profile(path: &str, web: &str, directory: &str) -> Result<(), String> {
     let real = signed_as(path, GOOGLE_CHROME).map_err(|_| "The Chrome that's running isn't Google's Chrome, so Threadbear didn't open the page in it.".to_owned())?;
     std::process::Command::new("/usr/bin/open").arg("-na").arg(&real).args(["--args", &format!("--profile-directory={directory}"), web]).spawn().map(|_| ()).map_err(|e| format!("Chrome didn't open: {e}"))
@@ -828,24 +825,9 @@ pub(crate) fn open_thread_in_zed(thread: &threadbear_core::inbox::ThreadSummary)
     if !Path::new(&target.cwd).is_absolute() { return Err("This thread's folder must be an absolute path.".into()); }
     if scripted_opens(&format!("zed:{}", target.cwd)) { return Ok(()); }
     #[cfg(target_os = "macos")]
-    {
-        // Zed as every fixed app is started (Daybreak 112): the installed
-        // bundle with Zed's own signature, never whatever a folder's .app
-        // claiming its id or name would make `open -a` pick.
-        use objc2_app_kit::{NSWorkspace, NSWorkspaceOpenConfiguration};
-        use objc2_foundation::{NSArray, NSString, NSURL};
-        let found = NSWorkspace::sharedWorkspace().URLForApplicationWithBundleIdentifier(&NSString::from_str("dev.zed.Zed"));
-        let path = found.and_then(|u| u.path()).map(|p| p.to_string()).ok_or_else(|| "Zed isn't installed on this Mac.".to_owned())?;
-        let real = signed_as(&path, ZED).map_err(|_| "The Zed on this Mac isn't Zed Industries' own, so Threadbear didn't open it.".to_owned())?;
-        let app = NSURL::fileURLWithPath(&NSString::from_str(&real.to_string_lossy()));
-        let folder = NSURL::fileURLWithPath(&NSString::from_str(&target.cwd));
-        let files = NSArray::from_retained_slice(&[folder]);
-        NSWorkspace::sharedWorkspace().openURLs_withApplicationAtURL_configuration_completionHandler(&files, &app, &NSWorkspaceOpenConfiguration::configuration(), None);
-        return Ok(());
-    }
+    let output = std::process::Command::new("/usr/bin/open").args(["-a", "Zed", "--", &target.cwd]).output();
     #[cfg(not(target_os = "macos"))]
     let output = std::process::Command::new("zed").args(["--", &target.cwd]).output();
-    #[cfg(not(target_os = "macos"))]
     match output {
         Ok(out) if out.status.success() => Ok(()),
         Ok(out) => Err(format!("Couldn't open Zed: {}", String::from_utf8_lossy(&out.stderr).trim())),
