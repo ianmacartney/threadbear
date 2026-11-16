@@ -1546,7 +1546,9 @@ upstream's (a cherry-pick of Mike's, or a fix of theirs he took). In a copy
 whose `origin` is mikecann/threadbear, or with nothing of upstream's to
 compare with, it's `off` and finds nothing. A change is done once a commit
 on `main` that upstream doesn't have carries a `Ports: <commit>` trailer
-naming it (seven or more hex digits), or once it's dismissed.
+naming it (seven or more hex digits), or once it's dismissed. A commit that
+changed `desktop/` as well as the Swift app was made in both apps at once,
+so it isn't listed.
 
 ```ts
 type SwiftChanges = {

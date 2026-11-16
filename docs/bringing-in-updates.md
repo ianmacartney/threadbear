@@ -75,8 +75,12 @@ changes clash with it and how you'd settle each, and anything they'd need
 to do themselves (a change to `runner/launcher/` only takes effect after
 `runner/scripts/install-runner.sh`, which they run from a terminal). If
 the release looks halfway through something (a feature half there, a
-commit that says it's temporary, tests skipped), say so. Then ask whether
-to go ahead. Nothing from it has run, and nothing has changed but git's
+commit that says it's temporary, tests skipped), say so. A release often
+adds checks that read the code (a security fix's source tests), and their
+own changes can fail one even where the merge is clean: say that if one
+does, you'll change their code the way the check asks and tell them what
+you changed when you land, so one go covers it. Then ask whether to go
+ahead. Nothing from it has run, and nothing has changed but git's
 objects.
 
 ## 4. Once they say go: merge, settle clashes, check
@@ -115,7 +119,9 @@ you land.
 ## 5. Land
 
 If the checks passed and every clash went the way you told them, `tb land`.
-If a check failed, or you had to rework something you hadn't told them
+A fix to their code for one of the release's own checks, as section 3
+said, needs no second ask: say what you changed when it's landed. If
+anything else failed, or you had to rework something you hadn't told them
 about, say what and ask again first. The runner, the backend and the app
 then update themselves from main, as they do for any change.
 
@@ -128,5 +134,10 @@ main takes the whole release back out in one go.
 the old main: if this Mac went, the merge and anything of theirs not yet
 pushed would go with it. Once it's landed, if `git log origin/main..main`
 lists anything, say so and ask whether to push it. Run `git push origin
-main` only when they say yes. If `origin` isn't on GitHub, or they'd rather
+main` only when they say yes. GitHub refuses a push that changes
+`.github/workflows/` (most releases do) from an HTTPS login without the
+`workflow` scope, which the GitHub CLI doesn't ask for by default. If
+`origin` pushes over HTTPS, look at `gh auth status` before you ask, and if
+its scopes lack `workflow`, ask them to run `gh auth refresh -h github.com
+-s workflow` in a Terminal (or push over SSH, where scopes don't apply). If `origin` isn't on GitHub, or they'd rather
 keep main to this Mac, leave it.

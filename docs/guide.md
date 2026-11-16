@@ -2173,7 +2173,8 @@ Whatever's still to do is in the Updates panel under Not in the new app
 yet: Port this starts a thread for that one change, and Dismiss leaves it
 out. A change leaves the list once a commit that rebuilds it says so with a
 `Ports: <commit>` line at the end of its message (the threads add one), or
-once you dismiss it. In a copy with no changes of its own there's nothing
+once you dismiss it. A change you made in both apps at once (its commit
+changed `desktop/` too) is already in the new app, so it isn't listed. In a copy with no changes of its own there's nothing
 to see.
 
 ### Light and dark
