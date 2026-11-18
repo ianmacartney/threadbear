@@ -42,7 +42,7 @@ const known = (route: Route, field: Field) => KNOWN.find((k) => k.route === rout
 
 for (const s of SCENARIOS) {
   test(`the same on every route: ${s.name}`, async () => {
-    const { views, refused } = await threeWays(s.play);
+    const { views, refused } = await threeWays(s.play, s.todo);
     assert.deepEqual(refused, [], 'the backend took everything the runner sent');
     for (const route of ['relay', 'phone'] as const) {
       for (const field of FIELDS) {
@@ -54,7 +54,7 @@ for (const s of SCENARIOS) {
 }
 
 test('each known difference is still a difference, and says why', async () => {
-  const all = await Promise.all(SCENARIOS.map((s) => threeWays(s.play)));
+  const all = await Promise.all(SCENARIOS.map((s) => threeWays(s.play, s.todo)));
   for (const k of KNOWN) {
     assert.ok(k.why.trim().endsWith('.'), 'says why, as a sentence');
     const differs = all.some(({ views }) => JSON.stringify(pick(views[k.route], k.field)) !== JSON.stringify(pick(views.here, k.field)));

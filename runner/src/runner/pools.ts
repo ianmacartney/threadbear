@@ -477,6 +477,13 @@ export const poolsPart = {
         `The thread so far:\n\n${lines.join('\n\n') || '(none)'}\n\n[End of handoff. The new message follows.]\n\n`
       );
     }
+    if (from.todo) {
+      const day = new Date(from.todo).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+      return (
+        `[Threadbear handoff] This thread began on ${day} as a todo ${rec.startedBy ? `filed for the user by ${rec.startedBy.label}` : 'the user wrote for themself'}, not a message to you: "read <link>" or "review <doc>" is something they mean to do. No agent has worked on it until now. This is a fresh session in ${rec.cwd}. ` +
+        `The thread so far:\n\n${lines.join('\n\n') || '(none)'}\n\n[End of handoff. Their message follows and says what they want from you.]\n\n`
+      );
+    }
     if (from.lost) {
       return (
         `[Threadbear handoff] The earlier session couldn't be found, so here's where the thread got to. This is a fresh session in ${rec.cwd}. ` +

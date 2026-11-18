@@ -111,6 +111,11 @@ test('challenge auth, hello, and JSON-RPC errors', async () => {
   await assert.rejects(c.call('threads.create', { text: 'x', accountId: 'claude-42' }), (e: { code: number }) => e.code === -32010);
   await assert.rejects(c.call('threads.create', { text: 'x', effort: 'huge' }), (e: { code: number; message: string }) => e.code === -32602 && /effort must be one of/.test(e.message));
   await assert.rejects(c.call('nope.method'), (e: { code: number }) => e.code === -32601);
+  // A todo (docs/protocol.md, "Todos"): no turn, so no turnId.
+  await assert.rejects(c.call('threads.create', { text: 'x', run: true }), (e: { code: number }) => e.code === -32602);
+  const todo = await c.call('threads.create', { text: 'review the OTEL doc', run: false });
+  assert.equal(todo.thread.todo, true);
+  assert.equal(todo.turnId, undefined);
   // A byline kind from a newer caller: the thread still starts, with none.
   const bylined = await c.call('threads.create', { text: 'x', accountId: 'claude-3', startedBy: { kind: 'robot', label: 'R2' } });
   assert.equal(bylined.thread.startedBy, undefined);

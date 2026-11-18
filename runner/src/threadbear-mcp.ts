@@ -87,7 +87,8 @@ export type ThreadControl = {
   // list, but failing when the other runner of a handover can't be asked
   // rather than leaving its threads out (handover.ts, ThreadRouter).
   listEverywhere?: (include: ('inbox' | 'snoozed' | 'archived')[]) => Promise<ThreadSummary[]>;
-} & Async<Runner, 'list' | 'search' | 'get' | 'events' | 'create' | 'send' | 'update' | 'interrupt' | 'delete'>;
+} & Async<Runner, 'list' | 'search' | 'get' | 'events' | 'create' | 'send' | 'update' | 'interrupt' | 'delete'> &
+  Partial<Async<Runner, 'createTodo'>>;
 
 // Messages a thread when the Mac app restarts onto a new build (app-restarts.ts).
 export type AppRestartControl = Pick<AppRestarts, 'watch' | 'isWatching'>;
@@ -1857,8 +1858,9 @@ export function buildThreadbearTools(
         why: z.string().optional().describe('A few plain words on why this thread exists, about 6 ("fixing a hook it hit"). The sidebar shows them when the user hovers the mark on its row, as they have none of your context for it.'),
         runner: z.string().optional().describe('Another of the user\'s machines to start it on: its name, or "main". folder is a path there (~ for its home). Where this machine can\'t, it asks the user first and waits.'),
         nested: z.boolean().optional().describe("false when the new thread isn't part of this thread's work (the user asked for one about something else), so it doesn't sit under this one."),
+        todo: z.boolean().optional().describe('true: file text as a todo in the user\'s inbox; no agent runs until they send it something.'),
       },
-      handle(async ({ text, title, folder: f, pool: p, account: acc, model, effort, permissionMode: asked, why, runner, nested }, extra) => {
+      handle(async ({ text, title, folder: f, pool: p, account: acc, model, effort, permissionMode: asked, why, runner, nested, todo }, extra) => {
         // From a thread not in full mode, the new thread gets its mode
         // unless the call says otherwise, and anything above it asks
         // (raising access, above). On another machine too.
@@ -1880,6 +1882,25 @@ export function buildThreadbearTools(
           }
           return { cwd, confined };
         };
+        if (todo) {
+          // docs/protocol.md, "Todos": on this machine only.
+          if (!control.createTodo || runner?.trim()) throw new Error('A todo can only be filed on this machine.');
+          const { cwd: here, confined: shut } = await ask(false);
+          const r = await control.createTodo({
+            text: head + text,
+            title: title?.trim() || firstLineSafely(text, 200) || undefined,
+            cwd: here!,
+            ...(shut ? { confined: shut } : caller?.confined ? { unconfine: true } : {}),
+            accountId: await account(acc),
+            ...(p !== undefined && !acc ? { poolId: pool(p) } : {}),
+            model,
+            effort,
+            permissionMode,
+            startedBy: { kind: 'thread', label: 'Agent', threadId: selfId, ...(why?.trim() ? { why: cutSafely(why.replace(/\s+/g, ' ').trim(), MAX_BYLINE) } : {}) },
+            detached: true,
+          });
+          return `Filed todo ${r.thread.id} "${r.thread.title}" in the user's inbox. No agent runs on it until they send it something.`;
+        }
         let { cwd, confined } = await ask(elsewhere);
         if (runner?.trim() && control.startOn) {
           const cleanWhy = why?.trim() ? cutSafely(why.replace(/\s+/g, ' ').trim(), MAX_BYLINE) : undefined;

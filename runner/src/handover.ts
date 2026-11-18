@@ -825,6 +825,12 @@ export class ThreadRouter implements ThreadControl {
     return e ? e.call('threads.create', { ...params }) : this.runner.create(params);
   }
 
+  // A todo (docs/protocol.md, "Todos"): made by the primary, as create is.
+  async createTodo(params: Parameters<Runner['createTodo']>[0]): Promise<ReturnType<Runner['createTodo']>> {
+    const e = this.runner.keeping() ? this.elsewhere() : undefined;
+    return e ? e.call('threads.create', { ...params, run: false }) : this.runner.createTodo(params);
+  }
+
   async send(threadId: string, text: string, images: Parameters<Runner['send']>[2] = [], opts: Parameters<Runner['send']>[3] = {}): Promise<{ turnId: string }> {
     const e = this.away(threadId);
     return e ? e.call('threads.send', { threadId, text, images, ...(opts.answers ? { answers: opts.answers } : {}) }) : this.runner.send(threadId, text, images, opts);

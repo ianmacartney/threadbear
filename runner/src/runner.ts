@@ -1636,6 +1636,11 @@ export class Runner {
 
   sendTo(st: ThreadState, text: string, images: ImageRef[], opts: SendOptions = {}): string {
     const { rec, rt } = st;
+    // A todo's first message brings its agent in (docs/protocol.md, "Todos").
+    if (rec.todo) {
+      delete rec.todo;
+      this.markDirty(st);
+    }
     if (opts.answers?.length && fromMike(text, opts) && this.answered) {
       const open = rec.needs?.needs === 'you' && rec.needs.seq === rec.lastTurnCompletedSeq ? rec.needs.asks : undefined;
       try {
@@ -2009,8 +2014,8 @@ export class Runner {
         delete rec.handoff;
       } else if (rec.handoff) {
         text = this.handoffNote(st, account) + text;
-        // A quick ask's thread never had a session, so nothing to say.
-        if (!rec.handoff.quickAsk) this.emit(st, { type: 'system.note', text: `Started a new session in ${rec.cwd} on ${account.title}.` }, msg.turnId);
+        // A quick ask's or a todo's thread never had a session, so nothing to say.
+        if (!rec.handoff.quickAsk && !rec.handoff.todo) this.emit(st, { type: 'system.note', text: `Started a new session in ${rec.cwd} on ${account.title}.` }, msg.turnId);
         rec.nativeSessionId = crypto.randomUUID();
         rec.sessionUsed = false;
         rec.sessionCostTotal = 0;
@@ -4012,6 +4017,7 @@ export class Runner {
     if (rec.startedBy) s.startedBy = { ...rec.startedBy };
     if (rec.detached) s.detached = true;
     if (rec.asked) s.asked = rec.asked;
+    if (rec.todo) s.todo = true;
     if (rec.keywords) s.keywords = rec.keywords;
     if (rec.panelRequest) s.panelRequest = { ...rec.panelRequest };
     // A record from 28 Oct may say "people" (sharing with specific people,

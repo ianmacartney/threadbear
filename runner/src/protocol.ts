@@ -292,6 +292,8 @@ export type ThreadSummary = {
   // Mike's last message to it, one line, for the sidebar's "You: ..."
   // (docs/protocol.md, "What Mike last asked"). Absent until he's sent one.
   asked?: string;
+  // Made with run: false and no turn has run yet (docs/protocol.md, "Todos").
+  todo?: true;
   // The librarian's search words for it, space-separated (docs/protocol.md,
   // "Search"): searches match them as well as the title and preview.
   keywords?: string;

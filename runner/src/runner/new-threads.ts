@@ -22,38 +22,40 @@ import { cutSafely } from '../safe-cut.ts';
 import { experimentOn } from '../experiments.ts';
 import { findSameWork, sameWorkNote, type SameWorkCandidate } from '../same-work.ts';
 
+export type CreateThreadParams = {
+  text: string;
+  images?: ImageRef[];
+  cwd?: string;
+  accountId?: string;
+  poolId?: string;
+  model?: string;
+  effort?: EffortLevel;
+  permissionMode?: PermissionMode;
+  title?: string;
+  origin?: MessageOrigin;
+  scheduleId?: string;
+  // false: start in the folder as it is, even in a repo that asks for a
+  // worktree per thread.
+  worktree?: boolean;
+  startedBy?: ThreadStartedBy;
+  // Not to sit under the thread in startedBy in the sidebar
+  // (docs/protocol.md, "Nested threads").
+  detached?: boolean;
+  // Started by a sandboxed thread's agent in a sandbox folder: shut in
+  // one too (ThreadRecord.confined).
+  confined?: boolean;
+  // The user has said this thread may run outside the sandbox the thread
+  // in startedBy is shut in (a create_thread card they allowed, their
+  // press of a button they allowed). Without it, a thread started from a
+  // sandboxed one is shut in too (makeThread).
+  unconfine?: boolean;
+  // Projects it starts in (New Thread on a project's page), joined
+  // before its first turn, so that turn already has the project's brief.
+  projectIds?: string[];
+};
+
 export const newThreadsPart = {
-  create(this: Runner, params: {
-    text: string;
-    images?: ImageRef[];
-    cwd?: string;
-    accountId?: string;
-    poolId?: string;
-    model?: string;
-    effort?: EffortLevel;
-    permissionMode?: PermissionMode;
-    title?: string;
-    origin?: MessageOrigin;
-    scheduleId?: string;
-    // false: start in the folder as it is, even in a repo that asks for a
-    // worktree per thread.
-    worktree?: boolean;
-    startedBy?: ThreadStartedBy;
-    // Not to sit under the thread in startedBy in the sidebar
-    // (docs/protocol.md, "Nested threads").
-    detached?: boolean;
-    // Started by a sandboxed thread's agent in a sandbox folder: shut in
-    // one too (ThreadRecord.confined).
-    confined?: boolean;
-    // The user has said this thread may run outside the sandbox the thread
-    // in startedBy is shut in (a create_thread card they allowed, their
-    // press of a button they allowed). Without it, a thread started from a
-    // sandboxed one is shut in too (makeThread).
-    unconfine?: boolean;
-    // Projects it starts in (New Thread on a project's page), joined
-    // before its first turn, so that turn already has the project's brief.
-    projectIds?: string[];
-  }): { thread: ThreadSummary; turnId: string } {
+  create(this: Runner, params: CreateThreadParams): { thread: ThreadSummary; turnId: string } {
     if (!params.text && !params.images?.length) throw new RpcError(ErrorCode.badParams, 'text or images required');
     checkImages(params.images ?? []);
     const projectIds = params.projectIds ?? [];
@@ -72,6 +74,39 @@ export const newThreadsPart = {
     for (const text of notes) this.emit(st, { type: 'system.note', text }, st.rt.turn?.turnId ?? turnId);
     if (!st.rec.titleSet && params.text?.trim()) void this.titleFromModel(st, params.text);
     return { thread: this.summary(st), turnId };
+  },
+
+  // A todo (docs/protocol.md, "Todos"): a thread whose first message is a
+  // note Mike wrote for himself, with no turn and no CLI until he sends it
+  // something. That first send starts a fresh session with a handoff note
+  // saying the note is his own to-do, not an instruction, so "read <link>"
+  // doesn't send the agent off to read it.
+  createTodo(this: Runner, params: CreateThreadParams): { thread: ThreadSummary } {
+    const text = params.text?.trim() ?? '';
+    if (!text) throw new RpcError(ErrorCode.badParams, 'text required');
+    if (params.images?.length) throw new RpcError(ErrorCode.badParams, "a todo can't have pictures");
+    const projectIds = params.projectIds ?? [];
+    if (projectIds.length) {
+      const projects = this.projects;
+      if (!projects) throw new RpcError(ErrorCode.badParams, 'projects are not available on this runner');
+      for (const p of projectIds) projects.get(p);
+    }
+    // No worktree of its own: nothing runs, and a todo filed in a repo
+    // shouldn't take a checkout before an agent is brought in.
+    const { st } = this.makeThread({ ...params, text, worktree: false });
+    const { rec } = st;
+    if (projectIds.length) this.projects!.changeMembership(rec.id, { add: projectIds, by: 'mike' });
+    // No turnId: no turn ran, or will until Mike sends it something.
+    const ev = this.emit(st, { type: 'user.message', text, images: [], ...(params.origin ? { origin: params.origin } : {}) });
+    rec.todo = true;
+    rec.handoff = { fromCwd: rec.cwd, fromAccountId: rec.accountId, todo: ev.ts };
+    // Mike's own is read; one a schedule or an agent filed is news to him.
+    if (!params.startedBy) rec.lastSeenSeq = ev.seq;
+    rec.preview = oneLine(text, LIMITS.previewChars);
+    this.markDirty(st);
+    if (!this.stopping) this.tellActivity({ kind: 'turn.start', threadId: rec.id });
+    if (!rec.titleSet) void this.titleFromModel(st, text);
+    return { thread: this.summary(st) };
   },
 
   // A quick ask the phone already answered out loud (docs/protocol.md, Sync,

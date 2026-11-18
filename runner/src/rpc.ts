@@ -654,7 +654,10 @@ export class RpcServer {
           });
         }
         if (p.worktree !== undefined && typeof p.worktree !== 'boolean') throw bad('worktree must be a boolean');
-        const res = r.create({
+        if (p.run !== undefined && p.run !== false) throw bad('run can only be false');
+        // A todo: no turn (docs/protocol.md, "Todos").
+        const make = p.run === false ? (q: Parameters<typeof r.create>[0]) => r.createTodo(q) : (q: Parameters<typeof r.create>[0]) => r.create(q);
+        const res: { thread: ThreadSummary; turnId?: string } = make({
           text: optString(p, 'text') ?? '',
           images: optImages(p),
           cwd: optString(p, 'cwd'),
@@ -678,7 +681,7 @@ export class RpcServer {
           ...(p.detached === true ? { detached: true } : {}),
           ...optProjectIds(p),
         });
-        return { thread: res.thread, turnId: res.turnId };
+        return { thread: res.thread, ...(res.turnId ? { turnId: res.turnId } : {}) };
       }
       case 'threads.samples':
         return r.samples({ cwd: reqString(p, 'cwd'), remove: p.remove === true });

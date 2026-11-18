@@ -95,6 +95,9 @@ const HELP = `tb: talk to the Threadbear runner
                                   it's runner.json's defaults.permissionMode, else full. --from says a
                                   tool started it, --why says why in a few words and --icon is
                                   an SF Symbol: the row shows them under the title
+  tb todo "text" [--cwd DIR] [--from NAME] [--why WORDS] [--icon SYMBOL]
+                                  files a todo in the inbox: a thread with no agent reply
+                                  until you send it something
   tb send <threadId> "text" [--image FILE]... [--wait]
   tb list [--snoozed] [--archived] [--all] [--json]
   tb search "words" [--json]
@@ -184,6 +187,7 @@ ${DEV_HELP}`;
 // `tb events <id> --from 3` used to print every event as if it had worked.
 const COMMAND_FLAGS: Record<string, string[]> = {
   new: ['cwd', 'account', 'pool', 'model', 'effort', 'ask', 'auto', 'plan', 'full', 'image', 'wait', 'json', 'from', 'why', 'icon'],
+  todo: ['cwd', 'json', 'from', 'why', 'icon'],
   send: ['image', 'wait', 'json'],
   list: ['snoozed', 'archived', 'all', 'json'],
   search: ['json'],
@@ -445,6 +449,17 @@ async function run(client: RunnerClient, cmd: string, args: string[], f: Flags):
       const r = await client.call<{ thread: ThreadSummary; turnId: string }>('threads.create', params);
       console.log(r.thread.id);
       if (f.wait) return tail(client, r.thread.id, { from: 0, json: Boolean(f.json), untilTurn: r.turnId });
+      return 0;
+    }
+    case 'todo': {
+      // docs/protocol.md, "Todos".
+      const params: Record<string, unknown> = { text: args.join(' '), run: false };
+      if (f.cwd) params.cwd = path.resolve(String(f.cwd));
+      const startedBy = startedByFlags(f, process.env.THREADBEAR_THREAD_ID);
+      if (startedBy) params.startedBy = startedBy;
+      const r = await client.call<{ thread: ThreadSummary }>('threads.create', params);
+      if (f.json) console.log(JSON.stringify(r.thread));
+      else console.log(r.thread.id);
       return 0;
     }
     case 'send': {

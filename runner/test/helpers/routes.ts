@@ -75,9 +75,12 @@ export type Play = {
   earlyStop(): void;
   /** The thread's login ran out and the runner moved it to another (runner/pools.ts moveLogin). */
   loginMoved(): void;
+  /** Alex sends a todo (threeWays' todo) its first message, which starts its first session. */
+  bringIn(text: string): Promise<void>;
 };
 
-export async function threeWays(play: (p: Play) => void | Promise<void>) {
+// todo: the thread starts as a todo with this note (docs/protocol.md, "Todos") rather than a first turn.
+export async function threeWays(play: (p: Play) => void | Promise<void>, todo?: string) {
   process.env.RUNNER_KEY = OWNER;
   delete process.env.RUNNER_KEY_NEXT;
   process.env.CONVEX_SITE_URL = 'https://site.example';
@@ -96,7 +99,7 @@ export async function threeWays(play: (p: Play) => void | Promise<void>) {
       throw e;
     }
   };
-  const { h, sync, ids } = await playInto(post as never, { key: OWNER, runnerId: RUNNER, name: 'mac-mini' }, [play]);
+  const { h, sync, ids } = await playInto(post as never, { key: OWNER, runnerId: RUNNER, name: 'mac-mini' }, [play], todo ? [todo] : []);
   const thread = { id: ids[0]! };
 
   const id = thread.id;
@@ -155,15 +158,18 @@ const NO_SUBSCRIBER = { subscribe: () => () => undefined, close: () => undefined
  * in-memory backend here, or a real one (scripts/parity-seed.ts). Returns
  * the threads' ids in order; the caller stops `sync`.
  */
-export async function playInto(post: Post, runner: { key: string; runnerId: string; name: string }, plays: ((p: Play) => void | Promise<void>)[]) {
+// todos[i]: play i's thread starts as a todo with that note, and its first send starts its first turn.
+export async function playInto(post: Post, runner: { key: string; runnerId: string; name: string }, plays: ((p: Play) => void | Promise<void>)[], todos: (string | undefined)[] = []) {
   const h = makeHarness();
   const sync = new ConvexSync({ config: { enabled: true, url: 'https://x.convex.cloud', name: runner.name, runnerId: runner.runnerId }, key: runner.key, home: h.cfg.home, runner: h.runner, version: '0.1.0+test', release: 'rel1', startedAt: '2026-10-27T00:00:00.000Z', clock: h.clock, log: nullLogger, post, upload: async () => 'st', subscriber: NO_SUBSCRIBER } as never);
   const ids: string[] = [];
-  for (const play of plays) {
-    const { thread } = h.runner.create({ text: 'Start', accountId: 'claude-3' });
+  for (const [i, play] of plays.entries()) {
+    const todo = todos[i];
+    const { thread } = todo ? h.runner.createTodo({ text: todo, accountId: 'claude-3' }) : h.runner.create({ text: 'Start', accountId: 'claude-3' });
     ids.push(thread.id);
-    const s = h.adapter.last;
-    s.init();
+    // A todo has no CLI until its first send, which makes one.
+    let s = h.adapter.last;
+    if (!todo) s.init();
     let n = 0;
     let lastPlan = '';
     await play({
@@ -195,6 +201,12 @@ export async function playInto(post: Post, runner: { key: string; runnerId: stri
       send: (text, images = []) => {
         h.runner.send(thread.id, text, images, {});
         h.adapter.last.init();
+      },
+      bringIn: async (text) => {
+        h.runner.send(thread.id, text, [], {});
+        for (let i = 0; i < 100 && h.adapter.last?.opts.threadId !== thread.id; i++) await new Promise((r) => setImmediate(r));
+        s = h.adapter.last;
+        s.init();
       },
       sendFromPhone: (text) => {
         h.runner.send(thread.id, text, [], { origin: 'phone' });

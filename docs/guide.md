@@ -61,6 +61,15 @@ above the Inbox, whatever they're doing, hibernating ones too, in the order you
 starred them, so they don't jump around. Archiving one moves it to Archived;
 bring it back and it's starred again.
 
+A thread can also be a todo: a note for yourself that no agent answers
+until you want one. `tb todo "review the OTEL doc"` in a Terminal (or from
+Alfred, Raycast or a script) files one in the inbox without opening the
+app, and an agent can file one for you with create_thread's `todo`. It's an
+ordinary row in the list, so star it for today, hibernate it until later,
+or archive it when it's done. When you want help with it, send it a
+message: an agent starts then, told that the note is your own to-do and not
+an instruction to it, so "read <link>" stays something you meant to read.
+
 The search box at the top, beside the New thread button, looks through
 every thread, the put-away ones too. Type part of a title, or of a thread's
 last reply, and each section shows only the threads that match, with folded

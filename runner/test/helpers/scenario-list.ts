@@ -12,9 +12,20 @@ import { tmpDir } from './fakes.ts';
 
 // shows: words each surface must show for it, which the parity run checks
 // on the website and the Mac app as well as taking their pictures.
-export type Scenario = { name: string; play: (p: Play) => void; shows: string[] };
+// todo: the thread starts as a todo with this note (docs/protocol.md, "Todos").
+export type Scenario = { name: string; play: (p: Play) => void | Promise<void>; shows: string[]; todo?: string };
 
 export const SCENARIOS: Scenario[] = [
+  {
+    name: 'a todo that Alex later hands to an agent',
+    todo: 'read the market for silver bullets paper',
+    shows: ['read the market for silver bullets paper', 'Summarise it for me.', 'Three points from the paper.'],
+    play: async (p) => {
+      await p.bringIn('Summarise it for me.');
+      p.say('Three points from the paper.');
+      p.endTurn({ needs: 'nothing' });
+    },
+  },
   {
     name: 'a phone message goes before an old pile of reminders',
     shows: ['Park the work now.', 'The work is parked.', 'Latest check-in'],

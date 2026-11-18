@@ -274,7 +274,8 @@ export type ThreadRecord = {
   // while the fresh session's first message is put together).
   // quickAsk: the thread began as a quick ask from the phone (Runner.quickAsk),
   // answered by a fast model rather than a session of its own.
-  handoff?: { fromCwd: string; fromAccountId: string; rebuilt?: boolean; lost?: boolean; quickAsk?: boolean };
+  // todo: the thread began as a todo Mike wrote for himself (Runner.create with run: false).
+  handoff?: { fromCwd: string; fromAccountId: string; rebuilt?: boolean; lost?: boolean; quickAsk?: boolean; todo?: string };
   copied?: true; // a copy of a real thread on a dev runner's --clone-real data: never runs (real-copy.ts)
   sample?: true; // one of the tour's sample threads (Runner.samples): made up, never sent to
   allowRules?: string[]; // "Always allow" rules, in the CLI's syntax
@@ -326,6 +327,8 @@ export type ThreadRecord = {
   startedBy?: ThreadStartedBy;
   // Mike's last message, one line (askedLine in runner.ts).
   asked?: string;
+  // A todo: made with run: false, and no turn has run since (docs/protocol.md, "Todos").
+  todo?: true;
   // The librarian's search words: what someone might type to find it that
   // its title doesn't say ("dentist" for a wisdom tooth appointment).
   // "" once a look or the keyword sweep found none, so the sweep moves on.
