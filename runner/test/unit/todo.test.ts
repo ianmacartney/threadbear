@@ -100,3 +100,13 @@ test('the note shows on another Mac and the phone, before the reply it later got
     ]);
   }
 });
+
+test("a patch's when sees todo: true until the first message brings an agent in", async () => {
+  const h = makeHarness();
+  const { thread } = h.runner.createTodo({ text: note });
+  const rec = () => h.runner.threads.get(thread.id)!.rec;
+  assert.equal(h.runner.patchThread(rec()).todo, true);
+  h.runner.send(thread.id, 'File this in Linear');
+  await tick();
+  assert.equal(h.runner.patchThread(rec()).todo, undefined);
+});

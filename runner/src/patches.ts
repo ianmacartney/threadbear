@@ -1052,7 +1052,9 @@ function callThenClose(call: () => unknown, shIn: LiveSh): unknown {
 // `thread` is the thread it's for: its title and its projects (a part
 // carries its parent), so a patch in a folder many threads share can show
 // in only some of them (`when: ({ thread }) => thread.projects.some(...)`).
-export type PatchThread = { title: string; projects: { id: string; title: string; parent?: { id: string; title: string } }[] };
+// todo: a todo no agent has worked on yet (docs/protocol.md, "Todos"), so a
+// patch can offer its triage chips only there.
+export type PatchThread = { title: string; projects: { id: string; title: string; parent?: { id: string; title: string } }[]; todo?: true };
 export type ItemsContext = { cwd: string; threadId: string; thread: PatchThread; matched: string[]; sh: (command: string) => Promise<string> };
 const NO_THREAD: PatchThread = { title: '', projects: [] };
 type ItemsFunction = (ctx: ItemsContext) => unknown;

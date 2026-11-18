@@ -3960,8 +3960,9 @@ project's patch it's one script in the repo and plain words (see
 
 **Live state.** An action or panel can also have `when` and `badge`,
 functions that get the same `{ cwd, threadId, thread, matched, sh }` as `items`.
-`thread` is `{ title, projects }`, each project `{ id, title }` with a
-`parent: { id, title }` when it's a part, so a patch in a folder many
+`thread` is `{ title, projects, todo? }`, each project `{ id, title }` with a
+`parent: { id, title }` when it's a part, and `todo: true` on a todo no
+agent has worked on yet (Todos), so a patch can offer triage chips there only, so a patch in a folder many
 threads share can turn up in only some of them:
 `when: ({ thread }) => thread.projects.some((p) => p.title === "Acceptance testing")`.
 A rename or a change to its projects reads them again.

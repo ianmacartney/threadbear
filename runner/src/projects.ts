@@ -257,7 +257,7 @@ export class Projects {
       const parent = p.parentId ? this.items.get(p.parentId) : undefined;
       projects.push(parent ? { id: p.id, title: p.title, parent: { id: parent.id, title: parent.title } } : { id: p.id, title: p.title });
     }
-    return { title: rec.title, projects };
+    return { title: rec.title, projects, ...(rec.todo ? { todo: true as const } : {}) };
   }
 
   // The folders the thread's patches load from, besides its own.

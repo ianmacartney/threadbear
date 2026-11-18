@@ -262,7 +262,7 @@ const EDITS_ASK_FIX = "Write the command as plain text, or build it only from co
 export const patchesPart = {
   // The thread as a patch's functions see it (PatchThread).
   patchThread(this: Runner, rec: ThreadRecord): PatchThread {
-    return this.projects?.patchThread(rec) ?? { title: rec.title, projects: [] };
+    return this.projects?.patchThread(rec) ?? { title: rec.title, projects: [], ...(rec.todo ? { todo: true as const } : {}) };
   },
 
   // What the thread's folder gives it (see Runtime.patches): the last set
