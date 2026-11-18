@@ -80,6 +80,12 @@ export function observe(state: HighlightState, events: Iterable<PersistedEvent>,
       case 'assistant.text':
         for (const found of linksIn(e.text, { cwd: ctx.cwd, home, isFile })) add({ ...found, how: 'mentioned', seq: e.seq }, e);
         break;
+      case 'user.message':
+        // A todo's note (docs/protocol.md, "Todos"): the only message
+        // written outside any turn that isn't an edit. Its links go in
+        // Highlights, so they open with no agent brought in.
+        if (!e.turnId && !e.editOf) for (const found of linksIn(e.text, { cwd: ctx.cwd, home, isFile })) add({ ...found, how: 'mentioned', seq: e.seq }, e);
+        break;
       case 'edit.diff':
         noteEdited(state, absolute(e.path, ctx.cwd, home));
         break;

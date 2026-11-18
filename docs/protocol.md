@@ -3717,6 +3717,10 @@ said, that the note is his own to-do and not an instruction ("read <link>"
 is something he means to read), and that the message after it says what he
 wants. Archiving a todo needs no turn either.
 
+Links in the note go in the thread's Highlights (`how: "mentioned"`), as
+links in a reply do, so they open with no agent brought in: the note is the
+only `user.message` outside any turn that isn't an edit.
+
 `tb todo "<text>" [--cwd DIR]` and the `create_thread` tool's `todo: true`
 make one the same way.
 

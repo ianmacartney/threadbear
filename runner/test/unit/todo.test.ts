@@ -110,3 +110,11 @@ test("a patch's when sees todo: true until the first message brings an agent in"
   await tick();
   assert.equal(h.runner.patchThread(rec()).todo, undefined);
 });
+
+test("a todo's links are in its Highlights, with no agent run", () => {
+  const h = makeHarness();
+  const { thread } = h.runner.createTodo({ text: 'review https://github.com/convex/workpool/pull/220 before Thursday' });
+  const hl = h.runner.highlights(thread.id).highlights;
+  assert.ok(hl.some((x) => x.kind === 'pr' || x.url === 'https://github.com/convex/workpool/pull/220'), JSON.stringify(hl));
+  assert.equal(h.adapter.sessions.length, 0);
+});
