@@ -1225,7 +1225,7 @@ impl Threadbear {
     fn menu_model(&self, cx: &App) -> Vec<TopMenu> {
         let t = self.open_thread();
         let has_thread = t.is_some();
-        let zed_available = self.main_thread().is_some_and(|t| !t.is_archived() && !t.is_remote());
+        let zed_available = self.main_thread().is_some_and(|t| crate::open_gate::zed_folder(t).is_ok());
         let zoom_now = style::zoom_percent();
         let panels_shown = !self.open_panes(cx).is_empty();
         let threads_showing = self.threads_showing(cx);

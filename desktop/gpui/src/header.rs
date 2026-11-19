@@ -364,7 +364,7 @@ impl Threadbear {
     }
 
     pub(crate) fn open_zed_for_thread(&mut self, thread: ThreadSummary, cx: &mut Context<Self>) {
-        if thread.is_archived() || thread.is_remote() { return; }
+        if crate::open_gate::zed_folder(&thread).is_err() { return; }
         let key = format!("zed:{}", thread.id);
         if !self.begin_note(&key, "Opening Zed…", cx) { return; }
         cx.spawn(async move |this, cx| {
@@ -372,7 +372,8 @@ impl Threadbear {
             this.update(cx, |this, cx| {
                 this.end_note(&key, cx);
                 match result {
-                    Ok(()) => this.flash_done("Opened in Zed", cx),
+                    Ok(true) => this.flash_done("Opened in Zed", cx),
+                    Ok(false) => {},
                     Err(error) => this.show_error(error, cx),
                 }
             }).ok();

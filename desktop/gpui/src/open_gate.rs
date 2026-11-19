@@ -829,19 +829,21 @@ fn installed_zed() -> Option<String> {
 
 pub(crate) fn zed_folder(thread: &threadbear_core::inbox::ThreadSummary) -> Result<&str, &'static str> {
     use threadbear_core::terminal::{local_thread_folder, FolderUnavailable};
-    local_thread_folder(thread, |p| policy::local_metadata(Path::new(p)).is_ok_and(|m| m.is_dir())).map_err(|reason| match reason {
+    let folder = local_thread_folder(thread, |p| policy::local_metadata(Path::new(p)).is_ok_and(|m| m.is_dir())).map_err(|reason| match reason {
         FolderUnavailable::Archived => "Open in Zed is unavailable for archived threads.",
         FolderUnavailable::Remote => "Open in Zed is unavailable for threads on another machine.",
         FolderUnavailable::Missing => "Zed couldn't open this thread's folder because it isn't on this machine.",
-    })
+    })?;
+    if !Path::new(folder).is_absolute() { return Err("This thread's folder must be an absolute path."); }
+    Ok(folder)
 }
 
 /// A deliberate toolbar click opens a local thread's folder in the fixed editor.
 /// Run off the UI thread; no shell parses the folder, including spaces or flags.
-pub(crate) fn open_thread_in_zed(thread: &threadbear_core::inbox::ThreadSummary) -> Result<(), String> {
-    let folder = zed_folder(thread)?;
-    if !Path::new(folder).is_absolute() { return Err("This thread's folder must be an absolute path.".into()); }
-    if scripted_opens(&format!("zed:{folder}")) { return Ok(()); }
+/// A folder that became unavailable after the click leaves the editor closed.
+pub(crate) fn open_thread_in_zed(thread: &threadbear_core::inbox::ThreadSummary) -> Result<bool, String> {
+    let Ok(folder) = zed_folder(thread) else { return Ok(false) };
+    if scripted_opens(&format!("zed:{folder}")) { return Ok(true); }
     // Zed by its fixed id, then only once it's Zed Industries' signed Zed
     // (Daybreak 112: any .app can claim another's id), started through its
     // own command-line tool inside that checked bundle.
@@ -854,7 +856,7 @@ pub(crate) fn open_thread_in_zed(thread: &threadbear_core::inbox::ThreadSummary)
     #[cfg(not(target_os = "macos"))]
     let output = std::process::Command::new("zed").args(["--", folder]).output();
     match output {
-        Ok(out) if out.status.success() => Ok(()),
+        Ok(out) if out.status.success() => Ok(true),
         Ok(out) => Err(format!("Couldn't open Zed: {}", String::from_utf8_lossy(&out.stderr).trim())),
         Err(error) => Err(format!("Couldn't open Zed. Check that it is installed: {error}")),
     }

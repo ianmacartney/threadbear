@@ -127,7 +127,8 @@ Feature: The thread's bar, banners and notes
     And I press Command O to open Zed
     Then Zed opens the selected thread's current folder
 
-  @header.more
+  # The frozen Swift app shows an error when its Zed shortcut is used on an archived thread.
+  @header.more @swift-pending
   Scenario: The Zed shortcut on an archived thread leaves other threads clear of errors
     When I open the thread "Morning brief"
     And I archive the open thread
@@ -137,3 +138,12 @@ Feature: The thread's bar, banners and notes
     Then Zed has neither opened nor raised an error
     When I open the thread "Export last quarter's invoices as CSV"
     Then there's no error bar
+
+  # The frozen Swift app also allows the shortcut when a local folder is missing.
+  @header.more @swift-pending
+  Scenario: Open in Zed is disabled when the thread's folder is gone
+    When I open the thread "Export last quarter's invoices as CSV"
+    Then the "File" menu disables "Open in Zed"
+    When I press Command O to open Zed
+    And I start a new thread
+    Then Zed has neither opened nor raised an error

@@ -49,6 +49,12 @@ Then('the {string} menu has {string}', async function (this: ThreadbearWorld, me
   assert.ok(out.find((m) => m.title === menu)?.items.some((i) => i.title === title), `${title} isn't in the ${menu} menu: ${JSON.stringify(out.find((m) => m.title === menu)?.items.map((i) => i.title))}`);
 });
 
+Then('the {string} menu disables {string}', async function (this: ThreadbearWorld, menu: string, title: string) {
+  const menus = JSON.parse(okValue(await this.app.do({ cmd: 'menus' }))) as { title: string; items: { title: string; enabled?: boolean }[] }[];
+  const item = menus.find((m) => m.title === menu)?.items.find((i) => i.title === title);
+  assert.equal(item?.enabled, false, `${title} in ${menu}: ${JSON.stringify(item ?? null)}`);
+});
+
 Then("the {string} menu hasn't {string}", async function (this: ThreadbearWorld, menu: string, title: string) {
   const out = JSON.parse(okValue(await this.app.do({ cmd: 'menus' }))) as { title: string; items: { title: string }[] }[];
   const items = out.find((m) => m.title === menu)?.items.map((i) => i.title);
