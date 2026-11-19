@@ -2,7 +2,9 @@
 // tasks"). A project can name a Notion page (or a database); the runner
 // finds the task database on it and reads its rows every few minutes
 // through Mike's Connectors gateway (connectors.ts), the same Notion login
-// his agents use, so there's no Notion key of its own to keep. Notion stays
+// his agents use, so there's no Notion key of its own to keep. With no
+// gateway, it reads through a Claude login's claude.ai Notion connector
+// instead (claudeConnectorCaller), one CLI call per read. Notion stays
 // the one place tasks are changed: people edit the board there and agents
 // move cards with the Notion tools. Threadbear only shows it.
 //
@@ -21,6 +23,9 @@ import { credentialUrlProblem } from './secure-url.ts';
 // How often a board is read when nobody's asking. Opening the project page
 // asks again once it's older than FRESH_MS.
 export const POLL_MS = 5 * 60_000;
+// Through a Claude login's connector each read is a CLI call of about 30k
+// (mostly cached) tokens on that login, so boards are read less often.
+export const CONNECTOR_POLL_MS = 30 * 60_000;
 export const FRESH_MS = 60_000;
 const TIMEOUT_MS = 30_000;
 // A view query returns at most 100 a page; a board reads this many pages
@@ -64,6 +69,28 @@ export function gatewayCaller(opts: { mcpUrl: string; headers: () => Promise<Rec
     if (msg.error) throw new Error(msg.error.message ?? 'the gateway gave an error');
     const text = (msg.result?.content ?? []).filter((c) => c.type === 'text').map((c) => c.text ?? '').join('\n');
     if (msg.result?.isError) throw new Error(signInLine(text) ?? (text.slice(0, 300) || 'Notion gave an error'));
+    return text;
+  };
+}
+
+// The same calls through a Claude login's own claude.ai Notion connector,
+// for a runner with no gateway: the official CLI makes each one
+// (models/claude-connector.ts), on the small-jobs pool, and the usage file
+// counts it under "notion-tasks". The gateway's names (notion__notion-fetch)
+// become claude.ai's (mcp__claude_ai_Notion__notion-fetch).
+export type ConnectorModels = {
+  connectorCall(p: { feature: string; tool: string; args: Record<string, unknown> }): Promise<{ ok: true; value: { text: string; isError: boolean } } | { ok: false; message: string }>;
+};
+
+export const CLAUDE_AI_NOTION = 'mcp__claude_ai_Notion__';
+
+export function claudeConnectorCaller(models: ConnectorModels): CallTool {
+  return async (name, args) => {
+    const tool = CLAUDE_AI_NOTION + name.replace(/^notion__/, '');
+    const res = await models.connectorCall({ feature: 'notion-tasks', tool, args });
+    if (!res.ok) throw new Error(`Notion through claude.ai's connector: ${res.message}`);
+    const { text, isError } = res.value;
+    if (isError) throw new Error(signInLine(text) ?? (text.slice(0, 300) || 'Notion gave an error'));
     return text;
   };
 }
@@ -450,6 +477,7 @@ type Timer = { cancel(): void };
 export type TaskBoardsOptions = {
   home: string; // the runner's data dir: project-tasks.json is kept there
   call?: CallTool; // none: no gateway, every board says so
+  pollMs?: number; // how often boards are read unasked (POLL_MS)
   log: Pick<Logger, 'info' | 'error'>;
   now?: () => number;
   setTimeout?: (fn: () => void, ms: number) => Timer;
@@ -537,7 +565,7 @@ export class TaskBoards {
     const fetchedAt = new Date(this.now()).toISOString();
     let next: Saved;
     if (!this.opts.call) {
-      next = { notion, tasks: { url: notion, columns: [], items: [], fetchedAt, error: 'Threadbear reads Notion through the Connectors gateway, and none is set up.' } };
+      next = { notion, tasks: { url: notion, columns: [], items: [], fetchedAt, error: "Threadbear reads Notion through a Connectors gateway or a Claude login's claude.ai Notion connector, and has neither (no gateway, and no Claude login in the small-jobs pool)." } };
     } else {
       try {
         const { source, board, tasks } = await readTasks(this.opts.call, notion, known, cached);
@@ -576,7 +604,7 @@ export class TaskBoards {
       t.unref?.();
       return { cancel: () => clearTimeout(t) };
     });
-    this.timer = set(() => this.tick(), POLL_MS);
+    this.timer = set(() => this.tick(), this.opts.pollMs ?? POLL_MS);
   }
 
   private save(): void {

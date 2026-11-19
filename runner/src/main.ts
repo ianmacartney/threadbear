@@ -34,7 +34,7 @@ import { MacScreen } from './mac-screen.ts';
 import { Projects, drainProjectMethods, projectMethods } from './projects.ts';
 import { Librarian, librarianMethods } from './librarian.ts';
 import { ConnectorsMonitor, connectorsMethods } from './connectors.ts';
-import { TaskBoards, gatewayCaller, helperHeaders } from './notion-tasks.ts';
+import { CONNECTOR_POLL_MS, TaskBoards, claudeConnectorCaller, gatewayCaller, helperHeaders } from './notion-tasks.ts';
 import { createLogger } from './log.ts';
 import { hidIdleMs, isAtMac } from './presence.ts';
 import { ThreadStore } from './store.ts';
@@ -464,12 +464,16 @@ async function main(): Promise<void> {
   });
   connectors.start();
   // Projects' task boards in Notion, read through the same gateway
-  // (notion-tasks.ts). With no gateway, a project with a Notion page
-  // shows why its board is empty.
+  // (notion-tasks.ts), or a Claude login's own Notion connector. With
+  // neither, a project with a Notion page shows why its board is empty.
   projects.useTaskBoards(
     new TaskBoards({
       home: cfg.home,
-      ...(cfg.connectorsClient ? { call: gatewayCaller({ mcpUrl: cfg.connectorsClient.mcpUrl, headers: helperHeaders(cfg.connectorsClient.headersHelper) }) } : {}),
+      // With no gateway, a Claude login's claude.ai Notion connector,
+      // through the CLI on the small-jobs pool.
+      ...(cfg.connectorsClient
+        ? { call: gatewayCaller({ mcpUrl: cfg.connectorsClient.mcpUrl, headers: helperHeaders(cfg.connectorsClient.headersHelper) }) }
+        : { call: claudeConnectorCaller(models), pollMs: CONNECTOR_POLL_MS }),
       log,
       onChange: () => projects.boardChanged(),
     }),

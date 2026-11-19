@@ -19,10 +19,12 @@ import { pickInPool } from '../pools.ts';
 import { askCli, cliDir } from './claude-pool.ts';
 import type { AskCli, CliResponse } from './claude-pool.ts';
 import { Ledger } from './ledger.ts';
+import { askConnector } from './claude-connector.ts';
+import type { AskConnector } from './claude-connector.ts';
 import { outermostBraces } from '../linear-text.ts';
 import type { UsageLine } from './ledger.ts';
 
-export type ModelJob = 'classify' | 'extract' | 'summarize' | 'generate' | 'decide';
+export type ModelJob = 'classify' | 'extract' | 'summarize' | 'generate' | 'decide' | 'connector';
 
 // Haiku for everything small; Opus for the few calls that need judgment
 // more than speed (a generate with `strong`: Mike's words for when to wake
@@ -38,6 +40,7 @@ export const ROUTES: Record<ModelJob, string> = {
   summarize: HAIKU,
   generate: HAIKU,
   decide: OPUS,
+  connector: HAIKU,
 };
 
 // no-pool: no pool, or none of its logins is a Claude one. off: this
@@ -82,8 +85,9 @@ export type ModelsOptions = {
   poolHost?: PoolHost;
   claudePath?: string;
   registry?: { add(pid: number, command: string): void; remove(pid: number): void };
-  // Stands in for the CLI in tests.
+  // Stand in for the CLI in tests.
   askCli?: AskCli;
+  askConnector?: AskConnector;
   // Who answers on a login that isn't Claude's: the ACP agents.
   askers?: Partial<Record<Provider, Asker>>;
   poolTimeoutMs?: number;
@@ -114,6 +118,9 @@ type Attempt<T> = {
   maxTokens?: number;
   jsonSchema?: { name: string; schema: Record<string, unknown> };
   read: (text: string) => T | undefined;
+  // Runs the call itself on the picked login instead of asking the model
+  // (connectorCall): Claude logins only.
+  via?: (account: Account, model: string) => Promise<CliResponse>;
 };
 
 export class Models {
@@ -219,6 +226,26 @@ export class Models {
     return this.run(p.strong ? 'decide' : 'generate', p, { system: p.system, user: p.prompt, maxTokens: p.maxTokens ?? 500, read: (t) => t.trim() || undefined });
   }
 
+  // One tool call through a Claude login's claude.ai connectors (the
+  // Notion boards' reads with no gateway: notion-tasks.ts), on the pool
+  // like any small job, and in the usage file under its feature. The value
+  // is the tool's text; isError when the tool itself said no.
+  connectorCall(p: Common & { tool: string; args: Record<string, unknown> }): Promise<ModelResult<{ text: string; isError: boolean }>> {
+    const { claudePath, registry, askConnector: fake } = this.opts;
+    if (!claudePath) return Promise.resolve({ ok: false, reason: 'off', message: 'Pool calls are off in this runner.' });
+    if (this.providerToAsk() !== 'claude') return Promise.resolve({ ok: false, reason: 'no-pool', message: 'claude.ai connectors need a Claude login in the pool.' });
+    let isError = false;
+    return this.run('connector', p, {
+      user: '',
+      read: (text) => ({ text, isError }),
+      via: async (account, model) => {
+        const res = await (fake ?? askConnector)({ account, model, claudePath, registry, tool: p.tool, args: p.args, cwd: cliDir(this.opts.home), timeoutMs: this.opts.poolTimeoutMs ?? POOL_TIMEOUT_MS });
+        isError = res.ok && res.isError === true;
+        return res;
+      },
+    });
+  }
+
   private async run<T>(job: ModelJob, p: Common, a: Attempt<T>): Promise<ModelResult<T>> {
     const s = this.opts.settings();
     if (p.cwd && isPrivate(p.cwd, s.privateFolders)) return { ok: false, reason: 'private', message: `${p.cwd} is a private folder.` };
@@ -250,7 +277,7 @@ export class Models {
         if (!account) break;
         tried.push(account.id);
         const started = this.opts.clock.now();
-        const res: CliResponse = await this.askFor(askable)!({
+        const res: CliResponse = a.via ? await a.via(account, model) : await this.askFor(askable)!({
           account,
           model,
           system: a.system,

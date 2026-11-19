@@ -960,8 +960,13 @@ Show fewer change how many are shown. Click the chip in a sent message to
 open the card; the arrow on a card, or its right-click menu, opens it in
 Notion. The menu also offers Copy Link and, when another thread is working
 on the card, Open the Thread Working on It. Boards are read through
-a Connectors gateway (see [Connectors](#connectors)); without one, the
-project's page says so and nothing is read.
+a Connectors gateway (see [Connectors](#connectors)) when there is one, and
+otherwise through the claude.ai Notion connector on one of the Claude logins
+in your small-jobs pool, so that login needs Notion connected on claude.ai.
+Read that way, a board is read every 30 minutes and whenever you open the
+project's page, each read a short Haiku call on that login that takes a few
+seconds. It isn't in Usage, which reads thread transcripts; the runner's
+`models/usage.ndjson` logs it, under `notion-tasks`.
 
 ## The librarian
 <!-- slug: librarian -->
@@ -1521,7 +1526,7 @@ login. Now and then one needs signing in again.
 The gateway is optional: it's a small server of your own
 ([plugbear](https://github.com/mikecann/plugbear)) that signs in to each
 service once for all your logins and Macs. Without one, agents use
-claude.ai's connectors alone, and Notion boards on projects aren't read.
+claude.ai's connectors alone, and Notion boards on projects are read through a Claude login's claude.ai Notion connector.
 
 Once there's a gateway, the Connectors icon (the plug) near the bottom of
 the left-hand rail opens a panel listing the gateway's services and whether each is signed in. A blue

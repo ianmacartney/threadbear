@@ -5444,6 +5444,22 @@ login's `connectors` entry in `~/.claude.json` (its URL and its
 `runner.json`'s `connectors.headersHelper` can name another). So it's the
 same Notion login the agents use, and the runner keeps no Notion key.
 
+With no gateway, each of those calls goes through a Claude login's own
+claude.ai Notion connector instead (`models/claude-connector.ts`): the
+official CLI in print mode with `--output-format stream-json`, on a login
+from the small-jobs pool, asked to make exactly that one call
+(`mcp__claude_ai_Notion__<tool>`, loaded with ToolSearch). Only ToolSearch and
+that tool may run, and the tools that read, write, run commands or reach the
+web are disallowed. The tool's result is taken straight off the stream once
+its call's input matches what was asked, and the CLI is stopped there, so
+the model never retypes it. Each call goes in `models/usage.ndjson` as
+feature `notion-tasks`, job `connector`. claude.ai's servers don't load
+under `--strict-mcp-config`, and on the 2.1.328 CLI Haiku only makes the
+call with Claude Code's own prompt and tool list, so each call carries
+about 25 to 35 thousand tokens of mostly cached context; so boards read
+this way are read every 30 minutes rather than 5 (and still when the
+project page asks).
+
 It finds the database on the page (the one called Tasks, else the first;
 a database or a `collection://` address is used as it is) and one of its
 views with no filter, then reads the rows through that view every 5
