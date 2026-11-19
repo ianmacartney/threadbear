@@ -7247,7 +7247,9 @@ same rename), `join_project` putting such a thread in a project,
 project such a thread is in (by the project's list or the thread's own), `move_thread` of a thread a schedule's check runs for
 (the check runs in its folder), `update_schedule` changing the text, title, time,
 folder or paused state of a schedule whose runs are above the caller or that
-has a check, and any `check`. A thread's access there is the most its agent
+has a check, and any `check`. A project-update approval names the current
+project as `{ title, id }` in its input, separately from any proposed new
+`title`. A thread's access there is the most its agent
 has now (`Runner.accessOf`): its mode, or more while a turn that had more is
 still running, as a Codex turn keeps the mode it started with. Setting the
 mode a thread or schedule already has is left out of the write, so it can't
