@@ -1012,6 +1012,9 @@ few things that matter most. To have something pinned, ask the thread
 ## Projects
 <!-- slug: projects -->
 
+When a project update needs your approval, its details show the current
+project name and ID alongside the proposed changes.
+
 <!-- picture: /docs-img/projects.webp alt: The Projects view: each project with its threads, what it's for and where it's up to -->
 
 A project gathers the threads about one thing, whatever folder they ran

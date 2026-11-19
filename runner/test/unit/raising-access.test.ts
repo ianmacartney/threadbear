@@ -327,7 +327,13 @@ test('ask: a project\'s brief reaching a thread with more access asks (join_proj
   // The Mac card's heading is only "Use update project?", so why it asks goes
   // in its reason line too, not just the title's tooltip (David, 9 Nov 2026).
   assert.equal(edit.card.reason, edit.card.title);
+  assert.deepEqual(edit.card.input.project, { title: 'Mine', id: p.id });
   assert.equal(s.projects.list()[0].goals, 'Tidy things');
+  const rename = await withCard(s, 'allow', 'update_project', { project: p.id, title: 'Renamed' });
+  assert.equal(rename.error, false);
+  assert.deepEqual(rename.card.input.project, { title: 'Mine', id: p.id });
+  assert.equal(rename.card.input.title, 'Renamed');
+  assert.equal(s.projects.list()[0].title, 'Renamed');
   // Folder paths are in the brief too.
   assert.equal((await withCard(s, 'deny', 'update_project', { project: p.id, addFolders: ['/tmp'] })).error, true);
   // Links too: their titles are words the thread reads (Codex review, 7 Nov 2026).
