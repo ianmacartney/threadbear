@@ -36,6 +36,26 @@ pub struct Target {
     pub note: Option<String>,
 }
 
+pub enum FolderUnavailable {
+    Archived,
+    Remote,
+    Missing,
+}
+
+/// The thread's folder, if it can be used for a local shell or editor.
+pub fn local_thread_folder(thread: &ThreadSummary, is_dir: impl FnOnce(&str) -> bool) -> Result<&str, FolderUnavailable> {
+    if thread.is_archived() {
+        return Err(FolderUnavailable::Archived);
+    }
+    if thread.is_remote() {
+        return Err(FolderUnavailable::Remote);
+    }
+    if thread.cwd.is_empty() || !is_dir(&thread.cwd) {
+        return Err(FolderUnavailable::Missing);
+    }
+    Ok(&thread.cwd)
+}
+
 /// `TerminalTarget.for`: a thread's own shell in its folder (its worktree when
 /// it has one), or the home shell, with a line saying why, for a thread whose
 /// folder isn't here: another machine's, an archived one's (its worktree may
@@ -45,17 +65,15 @@ pub struct Target {
 pub fn target_for(thread: Option<&ThreadSummary>, home: &str, runner: Option<&str>, is_dir: impl Fn(&str) -> bool) -> Target {
     let home_shell = |note: Option<String>| Target { key: TerminalKey::Home, cwd: home.to_owned(), note };
     let Some(thread) = thread else { return home_shell(None) };
-    if thread.is_archived() {
-        return home_shell(Some("This thread is archived, so this terminal is in your home folder.".to_owned()));
+    match local_thread_folder(thread, is_dir) {
+        Ok(cwd) => Target { key: TerminalKey::Thread(thread.id.clone()), cwd: cwd.to_owned(), note: None },
+        Err(FolderUnavailable::Archived) => home_shell(Some("This thread is archived, so this terminal is in your home folder.".to_owned())),
+        Err(FolderUnavailable::Remote) => {
+            let place = runner.map_or_else(|| "on another machine".to_owned(), |name| format!("on {name}"));
+            home_shell(Some(format!("This thread runs {place}, so this terminal is on this Mac, in your home folder.")))
+        }
+        Err(FolderUnavailable::Missing) => home_shell(Some("This thread's folder isn't on this Mac any more, so this terminal is in your home folder.".to_owned())),
     }
-    if thread.is_remote() {
-        let place = runner.map_or_else(|| "on another machine".to_owned(), |name| format!("on {name}"));
-        return home_shell(Some(format!("This thread runs {place}, so this terminal is on this Mac, in your home folder.")));
-    }
-    if thread.cwd.is_empty() || !is_dir(&thread.cwd) {
-        return home_shell(Some("This thread's folder isn't on this Mac any more, so this terminal is in your home folder.".to_owned()));
-    }
-    Target { key: TerminalKey::Thread(thread.id.clone()), cwd: thread.cwd.clone(), note: None }
 }
 
 /// Which of `keys` are shells of this Mac's threads that `threads` says are

@@ -335,7 +335,7 @@ impl Threadbear {
     // The bar's buttons: back, forward, share, the ... menu.
 
     pub(crate) fn render_header_buttons(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let thread = self.open_thread().cloned().filter(|_| self.home_page().is_none() && self.projects.open.is_none());
+        let thread = self.main_thread().cloned();
         let back = self.render_history_button(true, cx);
         let forward = self.render_history_button(false, cx);
         let share = thread.as_ref().filter(|_| self.website_url.is_some()).map(|t| self.render_share_button(t, cx));
@@ -346,11 +346,11 @@ impl Threadbear {
 
     /// Opens this panel's thread folder, including its worktree, for manual edits.
     pub(crate) fn render_zed_button(&mut self, thread: &ThreadSummary, cx: &mut Context<Self>) -> AnyElement {
-        let target = threadbear_core::terminal::target_for(Some(thread), "", None, |p| std::path::Path::new(p).is_dir());
-        let enabled = target.note.is_none();
+        let folder = crate::open_gate::zed_folder(thread);
+        let enabled = folder.is_ok();
         let key = format!("zed:{}", thread.id);
         let busy = self.busy_notes.iter().any(|(k, _)| k == &key);
-        let tip = target.note.unwrap_or_else(|| "Open in Zed".to_owned());
+        let tip = folder.err().unwrap_or("Open in Zed");
         let thread = thread.clone();
         let hover = style::sidebar_hover(cx);
         let color = style::secondary_text(cx);
@@ -364,6 +364,7 @@ impl Threadbear {
     }
 
     pub(crate) fn open_zed_for_thread(&mut self, thread: ThreadSummary, cx: &mut Context<Self>) {
+        if thread.is_archived() || thread.is_remote() { return; }
         let key = format!("zed:{}", thread.id);
         if !self.begin_note(&key, "Opening Zed…", cx) { return; }
         cx.spawn(async move |this, cx| {

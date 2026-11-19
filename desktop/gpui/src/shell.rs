@@ -482,6 +482,12 @@ impl Threadbear {
         self.selected.as_ref().and_then(|id| self.threads.get(id)).map(|t| &**t)
     }
 
+    /// The thread actually visible in the main panel. A page can cover it
+    /// while keeping the sidebar selection for when you go back.
+    pub(crate) fn main_thread(&self) -> Option<&threadbear_core::inbox::ThreadSummary> {
+        self.open_thread().filter(|_| self.home_page().is_none() && self.projects.open.is_none())
+    }
+
     /// `WindowDock.section(_:)` != nil: a pane section's panel, not the
     /// sidebar, the main panel, one of the activity bar's panels or a thread
     /// in a panel of its own.
@@ -764,8 +770,8 @@ impl Threadbear {
             Command::ToggleThreads => self.toggle_threads_panel(cx),
             Command::TogglePanels => self.toggle_panels(cx),
             Command::OpenInZed => {
-                if self.home_page().is_none() && self.projects.open.is_none() {
-                    if let Some(thread) = self.open_thread().cloned() { self.open_zed_for_thread(thread, cx); }
+                if let Some(thread) = self.main_thread().cloned() {
+                    self.open_zed_for_thread(thread, cx);
                 }
             }
             Command::ToggleTerminal => crate::terminal::toggle(self, window, cx),
@@ -1219,6 +1225,7 @@ impl Threadbear {
     fn menu_model(&self, cx: &App) -> Vec<TopMenu> {
         let t = self.open_thread();
         let has_thread = t.is_some();
+        let zed_available = self.main_thread().is_some_and(|t| !t.is_archived() && !t.is_remote());
         let zoom_now = style::zoom_percent();
         let panels_shown = !self.open_panes(cx).is_empty();
         let threads_showing = self.threads_showing(cx);
@@ -1253,7 +1260,7 @@ impl Threadbear {
                     ])
                     .collect(),
             ),
-            TopMenu::new("File", vec![item("New Thread", Command::NewThread), item("Open in Zed", Command::OpenInZed).enabled(has_thread), Separator, item("Close", Command::Close)]),
+            TopMenu::new("File", vec![item("New Thread", Command::NewThread), item("Open in Zed", Command::OpenInZed).enabled(zed_available), Separator, item("Close", Command::Close)]),
             // The text commands, as AppKit's standard Edit menu has them;
             // AppKit adds AutoFill, Start Dictation and Emoji & Symbols
             // under them on a Mac (window_menu.rs).

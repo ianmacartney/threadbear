@@ -126,3 +126,14 @@ Feature: The thread's bar, banners and notes
     When I open the thread "Morning brief"
     And I press Command O to open Zed
     Then Zed opens the selected thread's current folder
+
+  @header.more
+  Scenario: The Zed shortcut on an archived thread leaves other threads clear of errors
+    When I open the thread "Morning brief"
+    And I archive the open thread
+    And I click the Archived note
+    And I press Command O to open Zed
+    And I start a new thread
+    Then Zed has neither opened nor raised an error
+    When I open the thread "Export last quarter's invoices as CSV"
+    Then there's no error bar

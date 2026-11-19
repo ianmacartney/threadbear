@@ -801,8 +801,9 @@ of its own, started in the thread's folder (its worktree, when it has
 one), and it keeps running while you look at other threads, so going back
 finds it as you left it. A thread on another Mac or the cloud gets a shell
 on this Mac in your home folder, with a line saying so, and so do an
-archived thread (its worktree may be another thread's by now) and the
-new-thread page. If the shell exits, New Shell starts another. A shell
+archived thread (its worktree may be another thread's by now). Pages without
+an open thread, such as Scheduled and the new-thread page, use the home shell
+too. If the shell exits, New Shell starts another. A shell
 only starts when you ask for one, with ⌘J, a click on the empty panel or
 a command's play icon (below), so looking through threads with it open starts nothing. A thread's shell
 stops when the thread is archived or deleted, and they all stop when you

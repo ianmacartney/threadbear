@@ -827,13 +827,21 @@ fn installed_zed() -> Option<String> {
     NSWorkspace::sharedWorkspace().URLForApplicationWithBundleIdentifier(&NSString::from_str("dev.zed.Zed")).and_then(|u| u.path()).map(|p| p.to_string())
 }
 
+pub(crate) fn zed_folder(thread: &threadbear_core::inbox::ThreadSummary) -> Result<&str, &'static str> {
+    use threadbear_core::terminal::{local_thread_folder, FolderUnavailable};
+    local_thread_folder(thread, |p| policy::local_metadata(Path::new(p)).is_ok_and(|m| m.is_dir())).map_err(|reason| match reason {
+        FolderUnavailable::Archived => "Open in Zed is unavailable for archived threads.",
+        FolderUnavailable::Remote => "Open in Zed is unavailable for threads on another machine.",
+        FolderUnavailable::Missing => "Zed couldn't open this thread's folder because it isn't on this machine.",
+    })
+}
+
 /// A deliberate toolbar click opens a local thread's folder in the fixed editor.
 /// Run off the UI thread; no shell parses the folder, including spaces or flags.
 pub(crate) fn open_thread_in_zed(thread: &threadbear_core::inbox::ThreadSummary) -> Result<(), String> {
-    let target = threadbear_core::terminal::target_for(Some(thread), "", None, |p| Path::new(p).is_dir());
-    if let Some(reason) = target.note { return Err(reason); }
-    if !Path::new(&target.cwd).is_absolute() { return Err("This thread's folder must be an absolute path.".into()); }
-    if scripted_opens(&format!("zed:{}", target.cwd)) { return Ok(()); }
+    let folder = zed_folder(thread)?;
+    if !Path::new(folder).is_absolute() { return Err("This thread's folder must be an absolute path.".into()); }
+    if scripted_opens(&format!("zed:{folder}")) { return Ok(()); }
     // Zed by its fixed id, then only once it's Zed Industries' signed Zed
     // (Daybreak 112: any .app can claim another's id), started through its
     // own command-line tool inside that checked bundle.
@@ -841,10 +849,10 @@ pub(crate) fn open_thread_in_zed(thread: &threadbear_core::inbox::ThreadSummary)
     let output = {
         let path = installed_zed().ok_or_else(|| "Zed isn't installed on this Mac.".to_owned())?;
         let real = signed_as(&path, ZED).map_err(|_| "The registered Zed isn't Zed Industries' Zed, so Threadbear didn't open it.".to_owned())?;
-        std::process::Command::new(real.join("Contents/MacOS/cli")).arg("--").arg(&target.cwd).stdin(std::process::Stdio::null()).output()
+        std::process::Command::new(real.join("Contents/MacOS/cli")).arg("--").arg(folder).stdin(std::process::Stdio::null()).output()
     };
     #[cfg(not(target_os = "macos"))]
-    let output = std::process::Command::new("zed").args(["--", &target.cwd]).output();
+    let output = std::process::Command::new("zed").args(["--", folder]).output();
     match output {
         Ok(out) if out.status.success() => Ok(()),
         Ok(out) => Err(format!("Couldn't open Zed: {}", String::from_utf8_lossy(&out.stderr).trim())),

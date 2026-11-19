@@ -177,7 +177,7 @@ fn split_around<'a>(panel: &str, node: &'a DockNode) -> Option<&'a DockSplit> {
 
 /// The shell the open thread's Terminal is (`TerminalTarget.for`).
 fn target_of(app: &Threadbear) -> Target {
-    let thread = app.open_thread();
+    let thread = app.main_thread();
     let runner = thread.and_then(|t| t.runner_id.as_deref()).map(|id| app.runner_name_of(id));
     rules::target_for(thread, &crate::files::home_dir(), runner.as_deref(), |path| threadbear_core::open_policy::local_metadata(std::path::Path::new(path)).is_ok_and(|m| m.is_dir()))
 }
@@ -229,7 +229,7 @@ fn stop(key: &TerminalKey, cx: &mut App) {
 /// Whether a shell block in `block_thread`'s transcript may put its command in
 /// the Terminal (`canPutInTerminal(from:)`).
 pub(crate) fn can_put(app: &Threadbear, block_thread: &str) -> bool {
-    rules::can_put(Some(block_thread), app.selected.as_deref(), &target_of(app))
+    rules::can_put(Some(block_thread), app.main_thread().map(|t| t.id.as_str()), &target_of(app))
 }
 
 /// The same for drawing a play icon, from the target the panel last worked
@@ -238,7 +238,7 @@ pub(crate) fn shows_put(block_thread: &str, cx: &App) -> bool {
     let Some(terminals) = terminals(cx) else { return false };
     let t = terminals.read(cx);
     let Some(app) = t.app.upgrade() else { return false };
-    rules::can_put(Some(block_thread), app.read(cx).selected.as_deref(), &t.target)
+    rules::can_put(Some(block_thread), app.read(cx).main_thread().map(|t| t.id.as_str()), &t.target)
 }
 
 /// The app, for a shell block's icons, which are drawn where there's none to hand.
@@ -303,8 +303,8 @@ impl Terminals {
         // Not read here: the app is still being made.
         let watching = cx.observe(app, |this: &mut Terminals, app, cx| {
             let a = app.read(cx);
-            let thread = a.open_thread();
-            let seen = (a.selected.clone(), thread.map(|t| t.cwd.clone()).unwrap_or_default(), thread.is_some_and(|t| t.is_archived()), thread.and_then(|t| t.runner_id.clone()));
+            let thread = a.main_thread();
+            let seen = (thread.map(|t| t.id.clone()), thread.map(|t| t.cwd.clone()).unwrap_or_default(), thread.is_some_and(|t| t.is_archived()), thread.and_then(|t| t.runner_id.clone()));
             if this.seen.as_ref() != Some(&seen) {
                 let target = target_of(a);
                 this.seen = Some(seen);
@@ -1530,7 +1530,7 @@ impl EntityInputHandler for Session {
 pub(crate) fn dump(app: &Threadbear, cx: &App) -> Value {
     let Some(terminals) = terminals(cx) else { return Value::Null };
     let t = terminals.read(cx);
-    let target = target_of(app);
+    let target = &t.target;
     let session = t.sessions.get(&target.key).map(|s| s.read(cx));
     let mut shells: Vec<String> = t.sessions.values().map(|s| s.read(cx).summary()).collect();
     shells.sort();

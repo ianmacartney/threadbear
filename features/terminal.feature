@@ -144,6 +144,16 @@ Feature: The Terminal
     Then the Terminal says "This thread's folder isn't on this Mac any more, so this terminal is in your home folder."
     And the Terminal offers to start a shell
 
+  @terminal.panel @swift-pending
+  Scenario: Scheduled clears the Terminal's notice about the previous thread
+    When I open the thread "Morning brief"
+    And I archive the open thread
+    And I click the Archived note
+    And I bring up the Terminal without starting a shell
+    Then the Terminal says "This thread is archived, so this terminal is in your home folder."
+    When I click "Scheduled" in the activity bar
+    Then the Terminal has no thread notice
+
   @terminal.lifecycle
   Scenario: A shell starts only when one's asked for
     Given the thread "Rename the Settings tabs" works in a folder of its own

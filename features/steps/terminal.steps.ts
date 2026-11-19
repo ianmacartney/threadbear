@@ -232,6 +232,10 @@ Then('the Terminal says {string}', async function (this: ThreadbearWorld, note: 
   await this.until(`the note "${note}"`, (d) => d.terminal?.note === note);
 });
 
+Then('the Terminal has no thread notice', async function (this: ThreadbearWorld) {
+  await this.until('the Terminal on show without a thread notice', (d) => d.terminal?.shown && !d.terminal.note);
+});
+
 Then('the Terminal offers to start a shell', async function (this: ThreadbearWorld) {
   await this.until('no shell yet, with Start a shell', (d) => d.terminal?.shown === true && d.terminal.shell === 'none');
 });

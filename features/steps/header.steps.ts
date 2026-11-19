@@ -156,3 +156,10 @@ When('I click the header’s Zed button', async function (this: ThreadbearWorld)
 When('I press Command O to open Zed', async function (this: ThreadbearWorld) {
   await this.app.do({ cmd: 'menu-key', key: 'o', modifiers: ['cmd'] });
 });
+
+Then('Zed has neither opened nor raised an error', async function (this: ThreadbearWorld) {
+  const opened = await this.app.do({ cmd: 'opened' });
+  const dump = await this.app.dump();
+  assert.doesNotMatch(opened, /zed:/);
+  assert.ok(!dump.error, dump.error ?? undefined);
+});
