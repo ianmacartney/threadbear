@@ -6,11 +6,11 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { makeHarness, tmpDir } from '../helpers/fakes.ts';
 import { findWorktreePatch } from '../../src/patches.ts';
-import { cleanUpWorktree, git, land, landTargetFromGit, makeWorktree, overwrittenFiles } from '../../src/worktrees.ts';
+import { cleanUpWorktree, land, landTargetFromGit, makeWorktree, overwrittenFiles } from '../../src/worktrees.ts';
 import { RpcServer } from '../../src/rpc.ts';
 import { readToken } from '../../src/config.ts';
 import { nullLogger } from '../../src/log.ts';
-import { PATCH, addBorrowScript, capture, commit, harness, holdUntil, isLocked, lines, makeBranch, makeRepo, notes, runTb, sh, startTb, threadWithWorktree, until, write } from '../helpers/worktrees-harness.ts';
+import { PATCH, addBorrowScript, capture, commit, harness, holdUntil, isLocked, makeBranch, makeRepo, notes, runTb, sh, startTb, threadWithWorktree, until, write } from '../helpers/worktrees-harness.ts';
 
 // --------------------------------------------------------------- landing
 
@@ -336,7 +336,7 @@ test('tb land outside a thread goes by git: the thread/ branch, main\'s checkout
   assert.equal(elsewhere.out, `${main} is on main, not a thread/ branch. tb land runs in a thread's own worktree.\n`);
   const wrongFlag = await runTb(['land', '--json'], t.path, env);
   assert.equal(wrongFlag.code, 2);
-  assert.match(wrongFlag.out, /tb land doesn't take --json\. It takes --dry-run, --despite-red\./);
+  assert.match(wrongFlag.out, /tb land doesn't take --json\. It takes --dry-run, --despite-red, --allow-format\./);
 });
 
 test('borrow-worktree.sh hands out a thread/ branch tb land takes, and --give-back deletes it and makes a spare', async () => {

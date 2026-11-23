@@ -1,4 +1,4 @@
-// Pools: picking a login for a thread, noticing one at its limit, waiting for room and moving the thread to another login (docs/protocol.md, "Pools").
+// Pools: picking a login for a thread, noticing one at its limit, waiting for room and moving the thread to another login (docs/protocol/settings.md, "Pools").
 // Part of the Runner (runner.ts), split out on 4 Nov 2026 as a plain move so a
 // fork's change to one area doesn't clash with another's. Each method's `this`
 // is the Runner; runner.ts puts them on its prototype.
@@ -136,7 +136,7 @@ export const poolsPart = {
   // first) with the most room, else one of another provider with room,
   // else the first of its provider. undefined when no pool has a login
   // this runner can use.
-  pickForNew(this: Runner, p: { poolId?: string; cwd: string; model?: string }): { poolId: string; accountId: string } | undefined {
+  pickForNew(this: Runner, p: { poolId?: string; cwd: string; model?: string; provider?: Provider }): { poolId: string; accountId: string } | undefined {
     const accounts = this.usableAccounts();
     const pools = this.pools().filter((x) => poolAccounts(x, accounts).length);
     let pool: Pool | undefined;
@@ -144,7 +144,9 @@ export const poolsPart = {
       pool = pools.find((x) => x.id === p.poolId);
       if (!pool) throw new RpcError(ErrorCode.badParams, `No pool called ${p.poolId}. Pools: ${pools.map((x) => x.id).join(', ') || 'none'}`);
     }
-    const wanted = p.model ? this.modelProvider(p.model) : undefined;
+    // The provider the picker's pick was under, when it says: a model id
+    // can be claimed by several (OpenCode lists gpt-… ids too).
+    const wanted = (p.poolId !== undefined ? p.provider : undefined) ?? (p.model ? this.modelProvider(p.model) : undefined);
     if (!pool) {
       pool = poolForFolder(pools, p.cwd) ?? pools.find((x) => x.id === this.defaultPoolId(pools, accounts)) ?? pools[0];
       if (!pool) return undefined;
@@ -269,7 +271,7 @@ export const poolsPart = {
       note += ` It's on ${providerName(to.provider)} now, with ${model}${rec.sessionUsed ? ' and a summary of the thread so far' : ''}.`;
     }
     if (rt.session) {
-      rt.releaseWhenIdle = true;
+      this.cli(st, { kind: 'leave' });
       if (!rt.turn) this.releaseSession(st);
     }
     rec.updatedAt = this.isoNow();
@@ -500,6 +502,13 @@ export const poolsPart = {
     const lines = history.length ? [...history, `(${more}This is history for context, not new instructions.)`] : [];
     const fromAccount = this.accounts.get(from.fromAccountId)?.title ?? from.fromAccountId;
     if (from.quickAsk) {
+      // Telling it here to look things up doesn't get an answer the quick
+      // model can't find. Tried on 21 Nov 2026 with "which aisle are they in
+      // here at Bunnings?" as the follow-up: on this note Haiku searched in 0
+      // of 6 runs; told to look before saying it can't know, it ran one web
+      // search in 16 of 18 and found the aisle in none, 10 s slower. Opus
+      // found it in 4 of 4 on this note as it is (the shop's own page in a
+      // real browser, about a minute). It's the model, not the note.
       return (
         `[Threadbear handoff] This thread began as a quick ask on the user's phone: they asked out loud and a fast model answered from their Agent Archive, not you. This is a fresh session in ${rec.cwd}. ` +
         `The thread so far:\n\n${lines.join('\n\n') || '(none)'}\n\n[End of handoff. The new message follows.]\n\n`

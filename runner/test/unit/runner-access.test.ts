@@ -1,4 +1,4 @@
-// Per-runner keys (convex/runnerAccess.ts, docs/protocol.md "Runner keys"):
+// Per-runner keys (convex/runnerAccess.ts, docs/protocol/keys.md "Runner keys"):
 // the owner key does everything, a runner key acts as its own runner only.
 // The plain rules, without a deployment, plus a check that every function
 // in convex/sync.ts is sorted and asks the gate under its own name.
@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { convexPoster, forbiddenText } from '../../src/sync.ts';
-import { ACCESS, actsAs, badRunnerStats, BOX_CALLS, BOX_READS, callerFrom, isIsoTime, mayCall, mayClaim, mayFinish, mayTake, mayTouch, mayUseStorage, mayWrite, ownsCard, sameKey, wholeIn, type Caller } from '../../../convex/runnerAccess.ts';
+import { ACCESS, actsAs, badRunnerStats, BOX_CALLS, BOX_READS, callerFrom, isIsoTime, mayCall, mayClaim, mayFinish, mayTake, mayTouch, mayUseStorage, mayWrite, ownsCard, sameKey, webLinksOnly, wholeIn, type Caller } from '../../../convex/runnerAccess.ts';
 
 const OWNER_KEY = 'owner-key-of-the-deployment';
 const LAPTOP = 'laptop000001';
@@ -158,8 +158,16 @@ test("BOX_READS is exactly the box calls that are queries", () => {
   assert.deepEqual([...BOX_CALLS].filter((f) => queries.has(f)).sort(), [...BOX_READS].sort());
 });
 
-test("docs/protocol.md's table lists every function as ACCESS sorts it", () => {
-  const doc = fs.readFileSync(path.join(import.meta.dirname, '../../../docs/protocol.md'), 'utf8');
+// The protocol, whole: docs/protocol.md and, once it's split, docs/protocol/.
+function protocolDoc(): string {
+  const docs = path.join(import.meta.dirname, '../../../docs');
+  const dir = path.join(docs, 'protocol');
+  const parts = fs.existsSync(dir) ? fs.readdirSync(dir).filter((n) => n.endsWith('.md')).sort().map((n) => path.join(dir, n)) : [];
+  return [path.join(docs, 'protocol.md'), ...parts].map((f) => fs.readFileSync(f, 'utf8')).join('\n');
+}
+
+test("the protocol's table lists every function as ACCESS sorts it", () => {
+  const doc = protocolDoc();
   const label = { owner: 'owner only', own: 'its own', shared: 'any runner' } as const;
   for (const [fn, access] of Object.entries(ACCESS)) {
     assert.ok(new RegExp(`\\| \`${fn}\` \\| ${label[access]} \\|`).test(doc), `${fn} in the table as ${label[access]}`);
@@ -262,9 +270,19 @@ test("a box key takes its own thread's commands and its runner's, never another 
   assert.equal(ownsCard(box, { runnerId: BOX_RUNNER }), false);
 });
 
-test("docs/protocol.md lists what a box key may call", () => {
-  const doc = fs.readFileSync(path.join(import.meta.dirname, '../../../docs/protocol.md'), 'utf8').replace(/\r\n/g, '\n');
+test("the protocol lists what a box key may call", () => {
+  const doc = protocolDoc().replace(/\r\n/g, '\n');
   const listed = /<!-- box-calls -->\n([\s\S]*?)\n<!-- \/box-calls -->/.exec(doc)?.[1];
-  assert.ok(listed, 'docs/protocol.md has the box-calls list');
+  assert.ok(listed, 'the protocol has the box-calls list');
   assert.deepEqual([...listed.matchAll(/`(\w+)`/g)].map((m) => m[1]).sort(), [...BOX_CALLS].sort());
+});
+
+test("a thread row keeps an ask's web, thread and review links, and nothing else", () => {
+  const row = webLinksOnly({
+    links: [{ title: 'Doc', url: 'https://example.com' }, { title: 'Review', url: 'review:abc' }],
+    asks: [{ action: 'Pick one', links: [{ title: 'Open the mocks', url: 'review:0a7d18e2-5c14' }, { title: 'Its thread', url: 'thread:a1b2c3d4' }, { title: 'Page', url: 'https://example.com/p' }, { title: 'File', url: '/Users/x/a.png' }, { title: 'Odd', url: 'review:a/b' }] }],
+  });
+  // The row's own links (patch buttons) stay web pages only.
+  assert.deepEqual(row.links, [{ title: 'Doc', url: 'https://example.com' }]);
+  assert.deepEqual(row.asks[0].links.map((l: { url: string }) => l.url), ['review:0a7d18e2-5c14', 'thread:a1b2c3d4', 'https://example.com/p']);
 });

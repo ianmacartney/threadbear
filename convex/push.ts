@@ -11,11 +11,12 @@ import { request as httpsRequest } from 'node:https';
 import http2 from 'node:http2';
 import { v } from 'convex/values';
 import { internal } from './_generated/api';
-import { internalAction, type ActionCtx } from './_generated/server';
+import { env, internalAction, type ActionCtx } from './_generated/server';
 import { failureText } from './pushHealth';
 import { pushText } from './pushText';
 import { seal } from './pushSeal';
 import { API_VERSION } from './version';
+import { RELAY_REGISTER_MS, RELAY_REGISTER_TIMEOUT_MS } from './relayInstallStates';
 import { encryptWebPush, pinnedLookup, vapidAuthorization, WEB_PUSH_PLAINTEXT_MAX, type VapidKey } from './webPush';
 import { endpointProblem, privateAddress } from './webPushEndpoint';
 
@@ -33,59 +34,129 @@ const RELAY_URL = 'https://impartial-hound-393.ap-southeast-2.convex.site';
 type Target = { apnsToken: string; environment: 'sandbox' | 'production'; notify: 'away' | 'always' | 'off'; pushKey?: string; platform?: 'android' | 'webpush'; webPush?: { p256dh: string; auth: string } };
 
 // This deployment's own site address (relay registration, the VAPID subject).
-const siteUrl = (): string | undefined => process.env.CONVEX_SITE_URL;
+const siteUrl = (): string | undefined => env.CONVEX_SITE_URL;
 
-async function relayInstall(ctx: ActionCtx, url: string): Promise<{ installId: string; installKey: string } | { failure: string }> {
-  const known = await ctx.runQuery(internal.devices.relayInstall, { url });
-  if (known) return known;
+// fresh: this send registered it, so a refusal of it isn't an old key's.
+type Install = { attempt: string; installId: string; installKey: string; fresh?: boolean };
+
+// This deployment's install with the relay: the one held, or a new one
+// registered by this send, or, while another send registers, that one's once
+// it has it (relayInstallMachine.ts). Registering replaces the install's key
+// at the relay, so two sends registering at once would leave one of them,
+// and maybe the key saved last, refused. `refused`: the attempt whose key
+// the relay just refused (sendViaRelay).
+async function relayInstall(ctx: ActionCtx, url: string, refused?: string): Promise<Install | { failure: string }> {
+  // Long enough to wait out a registration that hangs and the one that takes over from it.
+  const until = Date.now() + RELAY_WAIT_MS;
+  for (;;) {
+    const attempt = randomBytes(12).toString('hex');
+    const took = await ctx.runMutation(internal.devices.takeRelayInstall, { url, attempt, ...(refused ? { refused } : {}) });
+    if ('use' in took && took.use) return took.use;
+    if ('failed' in took) return { failure: `${failureText(0)} the relay turned registering down lately; trying again in a few minutes` };
+    if ('register' in took) {
+      const got = await register(ctx, url, attempt);
+      // Another send took over while this one registered: its key, then.
+      if (!('retake' in got)) return got;
+    }
+    if (Date.now() >= until) return { failure: `${failureText(0)} another send is still registering with the relay` };
+    await new Promise((resolve) => setTimeout(resolve, RELAY_WAIT_STEP_MS));
+  }
+}
+const RELAY_WAIT_STEP_MS = 500;
+const RELAY_WAIT_MS = 2 * RELAY_REGISTER_MS + 30_000;
+
+async function register(ctx: ActionCtx, url: string, attempt: string): Promise<Install | { failure: string } | { retake: true }> {
   // The relay checks a registration really comes from the deployment it
   // names by posting the nonce back to that deployment's /relay/verify
   // (http.ts), so nobody can use up its allowance of new installs by
   // calling /register anonymously (relay/convex/http.ts).
   const deployment = siteUrl();
   const nonce = randomBytes(24).toString('hex');
-  if (deployment) await ctx.runMutation(internal.devices.startRelayCheck, { nonce });
-  const res = await fetch(`${url}/register`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ version: `api-${API_VERSION}`, ...(deployment ? { deployment, nonce } : {}) }) }).catch((e: Error) => e);
-  if (res instanceof Error || !res.ok) {
+  // Too little of its time left to wait for an answer: another send takes over (startRelayCheck).
+  if (deployment && (await ctx.runMutation(internal.devices.startRelayCheck, { nonce, attempt })) === false) return { retake: true };
+  // Given up on before another send may take over (RELAY_REGISTER_MS).
+  const res = await fetch(`${url}/register`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ version: `api-${API_VERSION}`, ...(deployment ? { deployment, nonce } : {}) }), signal: AbortSignal.timeout(RELAY_REGISTER_TIMEOUT_MS) }).catch((e: Error) => e);
+  const install = res instanceof Error || !res.ok ? undefined : ((await res.json().catch(() => undefined)) as { installId?: unknown; installKey?: unknown } | undefined);
+  if (typeof install?.installId !== 'string' || typeof install.installKey !== 'string') {
     const status = res instanceof Error ? 0 : res.status;
-    const reason = res instanceof Error ? res.message : ((await res.json().catch(() => ({}))) as { error?: string }).error;
+    const reason = res instanceof Error ? res.message : res.ok ? 'no install in its answer' : ((await res.json().catch(() => ({}))) as { error?: string }).error;
     console.warn(`[relay] couldn't register: ${failureText(status, reason)}`);
+    // The relay said no (4xx): nothing changed there, and sends wait a
+    // minute before asking again (RELAY_FAILED_RETRY_MS). Otherwise (no answer, a
+    // timeout, a 5xx, an answer that isn't an install) it may still be
+    // registering this one: the install stays this send's until its time is
+    // up, and the relay is told no from shortly before (devices.ts
+    // takeRelayCheck), so it can't replace the key of the send that
+    // registers next.
+    if (status >= 400 && status < 500) await ctx.runMutation(internal.devices.relayRegisterFailed, { url, attempt });
     return { failure: `${failureText(status)} couldn't register with the relay` };
   }
-  const install = (await res.json()) as { installId: string; installKey: string };
-  await ctx.runMutation(internal.devices.saveRelayInstall, { ...install, url });
-  return install;
+  const got = { attempt, installId: install.installId, installKey: install.installKey };
+  // Not kept: another send took over once this one's time was up, and the
+  // relay was told no to this one from before then, so the other's key is
+  // the newer: this send takes that.
+  if (!(await ctx.runMutation(internal.devices.relayRegistered, { url, ...got }))) return { retake: true };
+  return { ...got, fresh: true };
+}
+
+// One push to one phone through the relay: the relay's HTTP status, and its answer.
+async function relaySend(url: string, install: Install, alert: { title: string; body: string; threadId: string }, t: Target): Promise<{ status: number; r: { ok?: boolean; gone?: boolean; reason?: string; status?: number; error?: string } }> {
+  const res = await fetch(`${url}/send`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${install.installId}.${install.installKey}`, 'X-Threadbear-Version': `api-${API_VERSION}` },
+    body: JSON.stringify({ deviceToken: t.apnsToken, environment: t.environment, threadId: alert.threadId, ...(t.platform ? { platform: t.platform } : {}), ...(t.pushKey ? { encrypted: seal(t.pushKey, JSON.stringify({ title: alert.title, body: alert.body })) } : {}) }),
+  }).catch((e: Error) => ({ ok: false, status: 0, json: async () => ({ reason: e.message }) }) as unknown as Response);
+  return { status: res.status, r: (await res.json().catch(() => ({}))) as { ok?: boolean; gone?: boolean; reason?: string; status?: number; error?: string } };
 }
 
 // Through the relay. A phone that sent its pushKey gets the title and text
 // sealed with it, so the relay forwards only ciphertext; an older app
 // without one gets the relay's plain "A thread needs you", never the text.
 async function sendViaRelay(ctx: ActionCtx, alert: { title: string; body: string; threadId: string }, targets: Target[]): Promise<SendSummary> {
-  if (process.env.PUSH_RELAY === 'off') return { sent: 0, failed: 0, skipped: 'relayOff' };
-  const url = process.env.PUSH_RELAY_URL || RELAY_URL;
-  const install = await relayInstall(ctx, url);
-  if ('failure' in install) return { sent: 0, failed: targets.length, broken: targets.length, failure: install.failure };
+  if (env.PUSH_RELAY === 'off') return { sent: 0, failed: 0, skipped: 'relayOff' };
+  const url = env.PUSH_RELAY_URL || RELAY_URL;
+  const first = await relayInstall(ctx, url);
+  if ('failure' in first) return { sent: 0, failed: targets.length, broken: targets.length, failure: first.failure };
+  let install: Install = first;
   let sent = 0;
   let failed = 0;
   let broken = 0;
   let failure: string | undefined;
-  for (const t of targets) {
-    const res = await fetch(`${url}/send`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${install.installId}.${install.installKey}`, 'X-Threadbear-Version': `api-${API_VERSION}` },
-      body: JSON.stringify({ deviceToken: t.apnsToken, environment: t.environment, threadId: alert.threadId, ...(t.platform ? { platform: t.platform } : {}), ...(t.pushKey ? { encrypted: seal(t.pushKey, JSON.stringify({ title: alert.title, body: alert.body })) } : {}) }),
-    }).catch((e: Error) => ({ ok: false, status: 0, json: async () => ({ reason: e.message }) }) as unknown as Response);
-    const r = (await res.json().catch(() => ({}))) as { ok?: boolean; gone?: boolean; reason?: string; status?: number; error?: string };
-    if (res.status === 401) {
-      // The relay forgot this install: register again next time.
-      await ctx.runMutation(internal.devices.clearRelayInstall, {});
+  // One registration per send at most, the first included, so a relay
+  // refusing every key can't keep it registering.
+  let renewed = install.fresh === true;
+  for (const [i, t] of targets.entries()) {
+    let { status, r } = await relaySend(url, install, alert, t);
+    if (status === 401) {
+      // The relay doesn't know this key: it forgot the install, or another
+      // registration replaced it. Register again (unless another send
+      // already has: its key) and send this push once more.
+      const again: Install | { failure: string } | undefined = renewed ? undefined : await relayInstall(ctx, url, install.attempt);
+      renewed = true;
+      if (again && !('failure' in again)) {
+        install = again;
+        ({ status, r } = await relaySend(url, install, alert, t));
+      }
+      if (status === 401 || (again && 'failure' in again)) {
+        // No key the relay takes: cleared (if it's still the one held, and
+        // for a while if the relay refused it soon after giving it), and
+        // this phone and the rest fail with why, rather than each being
+        // sent with a key that can't work.
+        if (status === 401) await ctx.runMutation(internal.devices.relayRefused, { url, attempt: install.attempt });
+        const why = again && 'failure' in again ? again.failure : failureText(401, r.reason ?? r.error);
+        console.warn(`[relay] ${why} for the ${targets.length - i} phone(s) left`);
+        failed += targets.length - i;
+        broken += targets.length - i;
+        failure ??= why;
+        break;
+      }
     }
     if (r.ok) sent++;
     else {
       failed++;
       // Apple's status when the relay got that far (r.status), else the
       // relay's own HTTP status and error.
-      const said = failureText(typeof r.status === 'number' ? r.status : res.status, r.reason ?? r.error);
+      const said = failureText(typeof r.status === 'number' ? r.status : status, r.reason ?? r.error);
       console.warn(`[relay] ${said} for …${t.apnsToken.slice(-6)}`);
       if (r.gone) await ctx.runMutation(internal.devices.drop, { apnsToken: t.apnsToken });
       else {
@@ -100,7 +171,7 @@ async function sendViaRelay(ctx: ActionCtx, alert: { title: string; body: string
 type ApnsConfig = { key: string; keyId: string; teamId: string; topic: string };
 
 function apnsConfig(): ApnsConfig | null {
-  const { APNS_KEY_P8, APNS_KEY_ID, APNS_TEAM_ID, APNS_TOPIC } = process.env;
+  const { APNS_KEY_P8, APNS_KEY_ID, APNS_TEAM_ID, APNS_TOPIC } = env;
   if (!APNS_KEY_P8 || !APNS_KEY_ID || !APNS_TEAM_ID || !APNS_TOPIC) return null;
   return { key: toPem(APNS_KEY_P8), keyId: APNS_KEY_ID, teamId: APNS_TEAM_ID, topic: APNS_TOPIC };
 }
@@ -130,15 +201,16 @@ function providerToken(cfg: ApnsConfig, nowMs = Date.now()): string {
 
 type SendResult = { token: string; status: number; reason?: string };
 
-function sendOne(session: http2.ClientHttp2Session, cfg: ApnsConfig, jwt: string, token: string, payload: string): Promise<SendResult> {
+function sendOne(session: http2.ClientHttp2Session, cfg: ApnsConfig, jwt: string, token: string, payload: string, kind: 'alert' | 'background' = 'alert'): Promise<SendResult> {
   return new Promise((resolve) => {
     const req = session.request({
       ':method': 'POST',
       ':path': `/3/device/${token}`,
       authorization: `bearer ${jwt}`,
       'apns-topic': cfg.topic,
-      'apns-push-type': 'alert',
-      'apns-priority': '10',
+      // A background push (clear) must say so, at priority 5, or Apple refuses it.
+      'apns-push-type': kind,
+      'apns-priority': kind === 'alert' ? '10' : '5',
       'content-type': 'application/json',
     });
     let status = 0;
@@ -173,7 +245,7 @@ const vSendResult = v.object({ sent: v.number(), failed: v.number(), skipped: v.
 
 // The payload the phone app expects (docs/convex-backend.md, section 6).
 async function sendAlert(ctx: ActionCtx, alert: { title: string; body: string; threadId: string }, which: (notify: 'away' | 'always' | 'off') => boolean = (n) => n !== 'off'): Promise<SendSummary> {
-  const viaRelay = !apnsConfig() || process.env.PUSH_VIA === 'relay';
+  const viaRelay = !apnsConfig() || env.PUSH_VIA === 'relay';
   // A throw (a malformed APNS_KEY_P8 makes signing throw) counts as a
   // failure too, or a broken key would never be reported.
   let out: SendSummary;
@@ -214,7 +286,7 @@ async function deliver(ctx: ActionCtx, alert: { title: string; body: string; thr
 
 async function deliverRest(ctx: ActionCtx, alert: { title: string; body: string; threadId: string }, targets: Target[]): Promise<SendSummary> {
   const cfg = apnsConfig();
-  if (!cfg || process.env.PUSH_VIA === 'relay') return await sendViaRelay(ctx, alert, targets);
+  if (!cfg || env.PUSH_VIA === 'relay') return await sendViaRelay(ctx, alert, targets);
   // An Apple key is no use for an Android phone: those go through the relay,
   // to Firebase, after the Apple ones are sent.
   const apple = targets.filter((t) => t.platform !== 'android');
@@ -406,4 +478,72 @@ export const test = internalAction({
   args: { title: v.optional(v.string()), body: v.optional(v.string()) },
   returns: vSendResult,
   handler: async (ctx, { title, body }): Promise<SendSummary> => await sendAlert(ctx, { title: title ?? 'Threadbear', body: body ?? 'Test notification', threadId: 'test' }),
+});
+
+// The thread stopped needing Mike after a push went out for it (sync:upsertThreads):
+// a silent push to each phone that gets them, to take its notification down,
+// so the phone isn't left with ones he's already dealt with. The iPhone app
+// (AppDelegate) and the Android one (ThreadbearMessagingService) read
+// `clear`; apps from before it ignore it, as it has no alert and no
+// `threadId`. Through the relay's /clear, which a relay from before it
+// answers with a 404: then nothing happens, as before. Best effort: iOS
+// may hold a background push back, and the app tidies up when it next opens
+// too. Not counted in pushHealth, which is about notifications reaching him.
+export const clear = internalAction({
+  args: { threadId: v.string() },
+  returns: v.object({ sent: v.number(), failed: v.number() }),
+  handler: async (ctx, { threadId }): Promise<{ sent: number; failed: number }> => {
+    // Not UnifiedPush phones (the F-Droid build) yet: they'd need a clear of
+    // their own through sendWebPush, and their notifications still come down
+    // when the thread is opened there.
+    const targets = ((await ctx.runQuery(internal.devices.targets, {})) as Target[]).filter((t) => t.notify !== 'off' && t.platform !== 'webpush');
+    if (!targets.length) return { sent: 0, failed: 0 };
+    const cfg = apnsConfig();
+    const direct = cfg && env.PUSH_VIA !== 'relay' ? targets.filter((t) => t.platform !== 'android') : [];
+    const relayed = targets.filter((t) => !direct.includes(t));
+    let sent = 0;
+    let failed = 0;
+    if (direct.length && cfg) {
+      const payload = JSON.stringify({ aps: { 'content-available': 1 }, clear: threadId });
+      const jwt = providerToken(cfg);
+      for (const env of ['sandbox', 'production'] as const) {
+        const tokens = direct.filter((t) => t.environment === env).map((t) => t.apnsToken);
+        if (!tokens.length) continue;
+        const session = http2.connect(env === 'production' ? 'https://api.push.apple.com' : 'https://api.sandbox.push.apple.com');
+        session.on('error', (e) => console.error(`[apns] session error: ${e.message}`));
+        try {
+          for (const r of await Promise.all(tokens.map((t) => sendOne(session, cfg, jwt, t, payload, 'background')))) {
+            if (r.status === 200) sent++;
+            else {
+              failed++;
+              console.warn(`[apns] clear ${failureText(r.status, r.reason)} for …${r.token.slice(-6)}`);
+            }
+          }
+        } finally {
+          session.close();
+        }
+      }
+    }
+    if (relayed.length && env.PUSH_RELAY !== 'off') {
+      const url = env.PUSH_RELAY_URL || RELAY_URL;
+      const install = await relayInstall(ctx, url);
+      if ('failure' in install) return { sent, failed: failed + relayed.length };
+      for (const t of relayed) {
+        const res = await fetch(`${url}/clear`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${install.installId}.${install.installKey}`, 'X-Threadbear-Version': `api-${API_VERSION}` },
+          body: JSON.stringify({ deviceToken: t.apnsToken, environment: t.environment, threadId, ...(t.platform ? { platform: t.platform } : {}) }),
+        }).catch(() => null);
+        // A relay from before /clear: nothing to do, and no use trying the rest.
+        if (res?.status === 404) return { sent, failed };
+        const r = ((await res?.json().catch(() => ({}))) ?? {}) as { ok?: boolean; status?: number; reason?: string };
+        if (r.ok) sent++;
+        else {
+          failed++;
+          console.warn(`[relay] clear ${failureText(typeof r.status === 'number' ? r.status : (res?.status ?? 0), r.reason)} for …${t.apnsToken.slice(-6)}`);
+        }
+      }
+    }
+    return { sent, failed };
+  },
 });

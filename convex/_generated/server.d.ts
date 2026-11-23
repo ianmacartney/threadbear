@@ -30,6 +30,13 @@ import type { DataModel } from "./dataModel.js";
 type Env = {
   readonly CONVEX_CLOUD_URL: string;
   readonly CONVEX_SITE_URL: string;
+  readonly APNS_KEY_P8: string | undefined;
+  readonly APNS_KEY_ID: string | undefined;
+  readonly APNS_TEAM_ID: string | undefined;
+  readonly APNS_TOPIC: string | undefined;
+  readonly PUSH_RELAY: string | undefined;
+  readonly PUSH_RELAY_URL: string | undefined;
+  readonly PUSH_VIA: string | undefined;
 };
 
 /**

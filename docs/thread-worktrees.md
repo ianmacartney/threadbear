@@ -9,14 +9,14 @@ when its checks pass.
 
 ## Opting in
 
-Only repos that ask. A patch (docs/protocol.md, "Patches") can say:
+Only repos that ask. A patch (docs/protocol/patches.md, "Patches") can say:
 
 ```ts
 export default {
   worktree: {
     // Run in the new worktree before the first turn. Optional. One
     // script in the repo and plain words, as it runs by itself
-    // (docs/protocol.md, "Trusting a folder's patches").
+    // (docs/protocol/trust.md, "Trusting a folder's patches").
     setup: "./scripts/setup.sh",
     // Run by `tb land` before main moves. Optional; a failure stops it.
     check: "./check.sh --quick",
@@ -58,7 +58,7 @@ for a folder inside an opted-in repo:
    "worktree.setup"`). A failure is shown and the turn starts anyway.
    It's the worktree's own copy of the patch that's read, and only when
    that copy (with the scripts it names, as they are in the worktree) is
-   trusted; otherwise a note says the setup was skipped (docs/protocol.md,
+   trusted; otherwise a note says the setup was skipped (docs/protocol/trust.md,
    "Trusting a folder's patches").
 4. The record keeps `worktree: { repo, mainCheckout, path, branch, base }`
    (`base` is main's commit when it was made); the summary carries
@@ -70,6 +70,13 @@ The agent is told, in the appended system prompt: this thread has its own
 worktree of `<repo>` at `<path>` on branch `thread/<id8>`, made from main;
 commit there; other threads use other worktrees; when the work is done and
 checked, `tb land` puts it on main.
+
+In this repo the folder is usually an earlier thread's slot,
+`<parent>/threadbear-threads/slot-<n>` (below, "Reusing worktrees"), reused
+with its build caches so the app builds warm, and `worktree-setup.sh` links
+its `node_modules` to the main checkout's. Changing a `package.json`?
+Replace the link first: `rm runner/node_modules` (no trailing slash, so only
+the link goes), then `npm ci` there.
 
 ## Landing
 
@@ -91,6 +98,42 @@ stays. Separate repos do not block one another.
    docs/bringing-in-updates.md) is never rebased, since that would flatten
    the merge and rewrite Mike's commits: if main has moved, main is merged
    into it instead, with the same undo-and-name-the-files on a conflict.
+   A format commit on main that the branch doesn't have (one that only ran
+   a formatter over a folder, like `cargo fmt --all` over desktop/, listed
+   in `.git-blame-ignore-revs`) would conflict with every change the branch
+   made there, so when the branch changes anything it formats, each of its
+   commits is made again with its tree formatted as that commit was, and
+   its change in formatted terms goes onto main, the same three-way merge
+   a rebase does (`runner/src/format-replay.ts`). Only real conflicts are
+   left; one is named with `scripts/replay-over-format.sh`, which does the
+   same in the worktree and stops at the conflict for `git rebase
+   --continue`. A commit the formatter can't parse is left as it is there
+   and said. Waiting landings are stacked into a group check the same way.
+   The same goes for a tool that moves text between files rather than
+   formatting it (`# format-tool:`, like the split of docs/protocol.md
+   into docs/protocol/ by `scripts/split-protocol.mjs`): an edit made to the
+   single file comes across into the file its section went to. The branch
+   that brings in such a commit itself, rather than rebasing it onto a
+   main that has moved on in what it rewrote, has it made again there with
+   the same tool, its other commits picked as usual. Only a tool main's own
+   `.git-blame-ignore-revs` already lists, command, paths and config exactly,
+   is run, and only with config the branch hasn't changed: the branch's
+   list is anyone's who can commit to it, and Land runs on this Mac, not a
+   check host. One main doesn't list stops the landing before anything
+   runs, with the command shown and how to make that commit again by hand
+   (rebase, run it yourself, commit); one already made on main as it is now
+   lands as a plain commit. A formatter isn't run on a tree that brings its
+   own toolchain file, cargo config, mise or rtx config, a `.config` folder
+   or a link where it formats (names matched without case, as a Mac's disk
+   opens them), as those can change what the command runs. A group check
+   crossing format commits takes their commands from main's list, never
+   from the waiting branches stacked on it, nor a format commit of theirs.
+   And since main's list is what later landings run, a branch that adds or
+   changes a command in it, or changes a config file one runs with (the
+   split tool's script, the toolchain file), stops with what changed shown,
+   and lands only with `tb land --allow-format <id>`, the id it gives for
+   exactly those commands and file contents (the Land chip never passes
+   it; such a branch never rides in another's group check).
    Then it refuses a commit whose `Important:` line git doesn't read as a
    trailer (not in the last paragraph with `Co-Authored-By`), as a release
    would not flag it and forks wouldn't hear. And it holds a landing while
@@ -115,11 +158,21 @@ It pushes only where runner.json's `pushAfterLanding` lists the repo
 runner and the app follow the local main by themselves. On a machine with `followOrigin` on (docs/dev-tools.md), `tb
 land` refuses in the repo the runner follows, as that main has to stay
 GitHub's: push the branch as `cloud/<topic>` or hand the work to the main
-Mac.
+Mac. On Mike's Hetzner Cloud runner (and sandboxes to come) git pushes with a
+one-hour token the main Mac hands over (`~/dev/me/misc/github-app` there),
+and the repo's rulesets let it write only `cloud/**` branches: `main`, other
+branches and tags are refused, so push work as `cloud/<topic>` and say so.
 
 The Land chip has an hour for waiting and checking; other command actions
 keep their usual ten-minute limit. In an agent tool with its own shorter
-command limit, run `tb land` in the background and collect its result.
+command limit, run `tb land` in the background with the longest timeout and
+collect its result: landings waiting for the lock are checked together
+(below, "Landing together"), so expect up to two checks' wait. If it
+refuses, it says why and what to fix: commit your changes, sort out the
+conflicting files, fix the check, or wait for whoever has uncommitted
+changes in main's checkout. A failed check ends with the
+`./check.sh --only "..."` that runs just what failed, the quick way to see
+your fix work.
 
 ### A landing outlives its tb
 
@@ -361,6 +414,10 @@ So a failed check says what failed, and that alone is run on each landing:
   by itself: its own, then each of the others replayed onto main without
   the rest. A few test files are seconds each, plus the copy to the check
   host.
+- A group check no host could run (exit 69: each host it tried ran out of
+  disk during it, or none had room or answered; `scripts/check-remote.sh`)
+  is nobody's failure: nothing is run alone or halved, the holder's
+  `tb land` stops with the hosts' lines, and the rest go on in the line.
 - Main runs it first, with every step it names run whether or not
   anything changed (`THREADBEAR_CHECK_ALL`, check.sh's `--all`: the Swift
   steps never run on main with nothing changed, and a skip is no pass).
@@ -473,7 +530,10 @@ it again next time, a teardown should be safe to run twice.
 When a thread with a worktree is archived or deleted: if its branch is
 merged into main (or has no commits of its own), the worktree is removed
 (`git worktree remove`, `--force` only for untracked files) and the branch
-deleted. Otherwise both stay, with a `system.note` saying so and how to
+deleted. Its status is read again just before it's locked as a spare or
+removed, and an edit made meanwhile puts it back on its branch, kept: on 21
+Nov one made after the first look would have gone into the spare, for the
+next thread's `reset --hard`, or out with the folder under `--force`. Otherwise both stay, with a `system.note` saying so and how to
 land or drop them. Unarchiving a thread whose worktree was removed starts
 its next turn in the main checkout, with a note.
 
@@ -524,7 +584,11 @@ worktree: { setup: "...", check: "...", keep: ["app/.build", "dock/.build"] },
 With `keep`:
 
 - New worktrees are `<repo>-threads/slot-<n>`, not `<id8>`, as the folder
-  outlives the thread.
+  outlives the thread: the first number with no folder that git doesn't
+  still have registered (its folder removed by hand), trying the next when
+  git refuses one, a few times, and deleting the branch a refused add made.
+  On 21 Nov a slot removed by hand would have left every new thread with no
+  spare in the main checkout, and its branch refusing its next try.
 - Cleaning up a landed one detaches it, deletes its branch and locks it
   (`git worktree lock --reason "threadbear spare"`): a spare. Past six
   spares (`MAX_SPARES`), it's removed as before.
@@ -534,6 +598,10 @@ With `keep`:
   isn't: two at once both succeed.) Then `git reset --hard`, `git clean -ffdx` with the kept folders
   left out (an old thread's `node_modules` goes, its build cache stays),
   and `git checkout -b thread/<id8> main`. Setup runs as for a new one.
+  A spare with changes to tracked files is passed over and left unlocked,
+  out of the pool: its cleanup or give-back saw it clean, so someone is
+  working there, and the reset would take their work.
+  `borrow-worktree.sh` does the same.
 - A patch's `teardown` runs before the worktree is set aside, as for one
   that's removed: what the thread made is its own, not the next thread's.
 - A worktree that has to stay (work not on main, uncommitted changes)
@@ -544,7 +612,13 @@ With `keep`:
   again. Only while the folder is still the thread's own checkout, and only
   real folders inside it, never through a link; each is renamed aside right
   after that check, then deleted.
-- The record keeps `keep`, and `spare: true` once it's set aside. A
+- The record keeps `keep`, and `spare: true` once it's set aside. What the
+  record says of the worktree (held, cleanup owed, removed, handed on) is
+  one state type in `runner/src/slot.ts`, with every write in its
+  `writeSlot`; the same module says what each slot folder is on disk
+  (`slotOnDisk`: a spare, a thread's, a borrow, left behind, and the
+  disagreements, like a record whose folder is on another branch), which
+  the borrow sweep picks from. A
   spare's thread, unarchived, never goes back into that folder even though
   it's still there: it's another thread's now. Nor does any thread whose
   worktree was removed, whatever is at that path now: on 8 Nov a removed
@@ -556,8 +630,12 @@ With `keep`:
   threads archiving themselves and their starters writing to them again,
   24 came back there in four days and each had to borrow a worktree.
 
-A thread started outside the repo borrows one by hand with
-`./borrow-worktree.sh` and gives it back with `--give-back <dir>`. The
+A thread started outside the repo (in `~/dev/me/misc`, say) still needs a
+worktree of its own, as another thread may be editing the main checkout. It
+borrows a spare by hand with `./borrow-worktree.sh` in the main checkout,
+commits there, runs `tb land` in it, and gives it back with
+`--give-back <dir>` so the next thread gets it. Don't `git worktree add` a
+fresh one: its first app build takes 5 to 10 minutes. The
 borrowed one is on a branch of its own, `thread/borrow-<slot>-<time>`,
 so `tb land` in it lands it like any thread's (it only lands a `thread/`
 branch); giving it back deletes that branch. It takes a branch whose
@@ -625,7 +703,8 @@ touched. Besides `thread/` branches it takes Claude Code's own worktrees,
 helper's work and thrown away, which is what the `thread/` rule is
 there to tell apart from main and branches kept by hand.
 
-A hand-merge, landing without `tb land`, holds the same landing lock.
+A hand-merge, landing without `tb land`, holds the same landing lock (a
+plain `git merge` outside it wastes the queued checks).
 From the worktree, on a Mac:
 
 ```sh
@@ -704,5 +783,5 @@ the fetch: everything has to be inside the one locked command.
 - Moving a thread with a worktree to another folder (allowed, the worktree
   just stays where it is until the thread is archived).
 - Showing the branch in the app beyond the summary field.
-- Projects (docs/projects-design.md): when patches load from project
+- Projects (docs/archive/projects-design.md): when patches load from project
   folders, `worktree` still only counts from the thread's own folder chain.

@@ -194,5 +194,5 @@ Then('Zed has neither opened nor raised an error', async function (this: Threadb
   const opened = await this.app.do({ cmd: 'opened' });
   const dump = await this.app.dump();
   assert.doesNotMatch(opened, /zed:/);
-  assert.ok(!dump.error, dump.error ?? undefined);
+  assert.ok(!dump.error, dump.error ?? '');
 });
