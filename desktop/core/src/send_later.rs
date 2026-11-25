@@ -1,32 +1,88 @@
-//! Quick schedule times and the next known token reset for the composer.
+// The composer's quick send times: the arrow beside Send, and Send's
+// right-click, offer tonight at 9 pm, tomorrow at 9 am and the next known
+// token reset, each opening the schedule editor on Once at that time
+// (desktop/gpui/src/composer_send.rs draws them).
 use crate::logins::{Account, RunnerLogins};
 use crate::new_thread::{main_windows, pool_logins, tightest, usage_of, PICK_FLOOR};
 use chrono::{DateTime, TimeZone};
 
-/// Local calendar dates, rather than adding 24 hours across daylight saving.
+/// A minute after a reset, as the runner's waits end (`WAIT_SLACK_MS` in
+/// runner/src/pools.ts), so the provider has caught up.
+const RESET_SLACK_MS: i64 = 60_000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Preset {
+    Tonight,
+    Tomorrow,
+    TokenReset,
+}
+
+/// One row of the menu: what it says, and when it would send (None when it
+/// can't say, which leaves the row there but disabled).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Choice {
+    pub preset: Preset,
+    pub title: String,
+    pub at: Option<i64>,
+}
+
+/// Today at 9 pm, by the local calendar; None once it's gone, so the menu
+/// never calls tomorrow night "tonight".
 pub fn tonight<Tz: TimeZone>(now: &DateTime<Tz>) -> Option<i64> {
-    let date = now.date_naive().and_hms_opt(21, 0, 0)?;
-    let at = now
-        .timezone()
-        .from_local_datetime(&date)
-        .earliest()?
-        .timestamp_millis();
+    let at = local_at(now, 0, 21)?;
     (at > now.timestamp_millis()).then_some(at)
 }
 
+/// Tomorrow at 9 am, by the local calendar rather than 24 hours on, which
+/// a daylight-saving change would put an hour out.
 pub fn tomorrow<Tz: TimeZone>(now: &DateTime<Tz>) -> Option<i64> {
-    let date = now.date_naive().succ_opt()?.and_hms_opt(9, 0, 0)?;
+    local_at(now, 1, 9)
+}
+
+fn local_at<Tz: TimeZone>(now: &DateTime<Tz>, days_on: u64, hour: u32) -> Option<i64> {
+    let day = now
+        .date_naive()
+        .checked_add_days(chrono::Days::new(days_on))?;
+    let at = day.and_hms_opt(hour, 0, 0)?;
     now.timezone()
-        .from_local_datetime(&date)
+        .from_local_datetime(&at)
         .earliest()
         .map(|d| d.timestamp_millis())
 }
 
-/// A known reset, not a guess: mirror pools.ts's blocking-window rule and
-/// one-minute grace period. With room left, wait for the next used window
-/// to refill. Stale readings and elapsed/missing blocking resets cannot
-/// promise availability; the regular time picker remains available.
+/// When the box's login has room again, plus a minute: a pinned login's own
+/// reset, or for a pool the earliest among its logins of the box's kind
+/// (the schedule keeps the pool, so the runner still picks the login when
+/// it runs).
+pub fn token_reset(
+    logins: &RunnerLogins,
+    account_id: &str,
+    pool_id: Option<&str>,
+    provider: &str,
+    now_ms: i64,
+) -> Option<i64> {
+    match pool_id {
+        Some(pool_id) => {
+            let pool = logins.pools.iter().find(|p| p.id == pool_id)?;
+            pool_logins(pool, &logins.accounts, Some(provider))
+                .into_iter()
+                .filter_map(|a| account_reset(a, now_ms))
+                .min()
+        }
+        None => account_reset(logins.accounts.iter().find(|a| a.id == account_id)?, now_ms),
+    }
+}
+
+/// A known reset, never a guess. Out of room: when every window holding it
+/// back has reset, as the runner's `backAt` has it (runner/src/pools.ts),
+/// the tightest window when the provider says it's blocked with none at its
+/// limit. With room: the next reset of a window it has used. Old readings,
+/// a reset that's missing or gone by, and a login only signing in again
+/// brings back say nothing.
 fn account_reset(account: &Account, now_ms: i64) -> Option<i64> {
+    if account.signed_out || account.plan_ended {
+        return None;
+    }
     if account.usage.as_ref()?["stale"].as_bool() == Some(true) {
         return None;
     }
@@ -53,36 +109,48 @@ fn account_reset(account: &Account, now_ms: i64) -> Option<i64> {
             .into_iter()
             .max()?
     };
-    at.checked_add(60_000)
+    at.checked_add(RESET_SLACK_MS)
 }
 
-/// Pinned account, or the earliest known replenishment among this pool's
-/// logins on the selected provider. Preserve the pool on the schedule so
-/// the runner still chooses its login when it runs.
-pub fn token_reset(
-    logins: &RunnerLogins,
-    account_id: &str,
-    pool_id: Option<&str>,
-    provider: &str,
-    now_ms: i64,
-) -> Option<i64> {
-    if let Some(pool_id) = pool_id {
-        let pool = logins.pools.iter().find(|p| p.id == pool_id)?;
-        pool_logins(pool, &logins.accounts, Some(provider))
-            .into_iter()
-            .filter_map(|a| account_reset(a, now_ms))
-            .min()
-    } else {
-        account_reset(logins.accounts.iter().find(|a| a.id == account_id)?, now_ms)
+/// The menu's quick times, in order. Tonight drops out after 9 pm; the
+/// token reset stays, disabled, when no reset is known.
+pub fn choices<Tz: TimeZone>(now: &DateTime<Tz>, token_reset: Option<i64>) -> Vec<Choice> {
+    let mut out = Vec::new();
+    if let Some(at) = tonight(now) {
+        out.push(Choice {
+            preset: Preset::Tonight,
+            title: "Send tonight at 9 pm…".into(),
+            at: Some(at),
+        });
     }
+    out.push(Choice {
+        preset: Preset::Tomorrow,
+        title: "Send tomorrow at 9 am…".into(),
+        at: tomorrow(now),
+    });
+    out.push(Choice {
+        preset: Preset::TokenReset,
+        title: match token_reset {
+            Some(at) => format!(
+                "Send when tokens reset ({})…",
+                crate::usage::when(at, now.timestamp_millis(), &now.timezone())
+            ),
+            None => "Send when tokens reset (time not known)".into(),
+        },
+        at: token_reset,
+    });
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::logins::{Account, Pool, RunnerLogins};
-    use chrono::{FixedOffset, TimeZone};
+    use crate::logins::Pool;
+    use chrono::FixedOffset;
     use serde_json::json;
+
+    const NOW: i64 = 1_800_000_000_000;
+    const HOUR: i64 = 3_600_000;
 
     fn account(
         id: &str,
@@ -95,74 +163,92 @@ mod tests {
         Account {
             id: id.into(),
             provider: "codex".into(),
-            usage: Some(json!({"windows": [
-                {"kind": "five_hour", "remainingPercent": five, "resetsAt": iso(five_at)},
-                {"kind": "weekly", "remainingPercent": week, "resetsAt": iso(week_at)}
+            usage: Some(json!({ "windows": [
+                { "kind": "five_hour", "remainingPercent": five, "resetsAt": iso(five_at) },
+                { "kind": "weekly", "remainingPercent": week, "resetsAt": iso(week_at) }
             ]})),
             ..Default::default()
         }
     }
-    const NOW: i64 = 1_800_000_000_000;
 
     #[test]
-    fn calendar_presets_stay_in_the_future_and_use_local_time() {
+    fn calendar_times_go_by_the_local_clock_and_tonight_goes_at_nine() {
         let tz = FixedOffset::west_opt(8 * 3600).unwrap();
-        let now = tz.with_ymd_and_hms(2026, 11, 19, 17, 0, 0).unwrap();
+        let ms = |d, h| {
+            tz.with_ymd_and_hms(2026, 11, d, h, 0, 0)
+                .unwrap()
+                .timestamp_millis()
+        };
+        let five_pm = tz.with_ymd_and_hms(2026, 11, 19, 17, 0, 0).unwrap();
+        assert_eq!(tonight(&five_pm), Some(ms(19, 21)));
+        assert_eq!(tomorrow(&five_pm), Some(ms(20, 9)));
+        let nine_pm = tz.with_ymd_and_hms(2026, 11, 19, 21, 0, 0).unwrap();
+        assert_eq!(tonight(&nine_pm), None);
+        let titles: Vec<_> = choices(&nine_pm, None)
+            .into_iter()
+            .map(|c| c.title)
+            .collect();
         assert_eq!(
-            tonight(&now),
-            Some(
-                tz.with_ymd_and_hms(2026, 11, 19, 21, 0, 0)
-                    .unwrap()
-                    .timestamp_millis()
-            )
+            titles,
+            [
+                "Send tomorrow at 9 am…",
+                "Send when tokens reset (time not known)"
+            ]
         );
-        assert_eq!(
-            tomorrow(&now),
-            Some(
-                tz.with_ymd_and_hms(2026, 11, 20, 9, 0, 0)
-                    .unwrap()
-                    .timestamp_millis()
-            )
-        );
-        assert_eq!(
-            tonight(&tz.with_ymd_and_hms(2026, 11, 19, 21, 0, 0).unwrap()),
-            None
-        );
+        let c = choices(&five_pm, Some(ms(19, 18) + 60_000));
+        assert_eq!(c[0].title, "Send tonight at 9 pm…");
+        assert_eq!(c[2].title, "Send when tokens reset (6:01 pm)…");
     }
+
     #[test]
-    fn reset_waits_for_every_exhausted_window_and_adds_a_minute() {
-        let a = account("a", 0., 0., Some(NOW + 3_600_000), Some(NOW + 86_400_000));
-        assert_eq!(account_reset(&a, NOW), Some(NOW + 86_460_000));
-        let a = account("a", 0., 50., Some(NOW + 3_600_000), Some(NOW + 86_400_000));
-        assert_eq!(account_reset(&a, NOW), Some(NOW + 3_660_000));
+    fn out_of_room_waits_for_every_window_holding_it_back_plus_a_minute() {
+        let a = account("a", 0., 0., Some(NOW + HOUR), Some(NOW + 24 * HOUR));
+        assert_eq!(account_reset(&a, NOW), Some(NOW + 24 * HOUR + 60_000));
+        let a = account("a", 0., 50., Some(NOW + HOUR), Some(NOW + 24 * HOUR));
+        assert_eq!(account_reset(&a, NOW), Some(NOW + HOUR + 60_000));
     }
+
     #[test]
-    fn can_wait_for_more_tokens_before_hitting_the_limit() {
-        let a = account("a", 30., 60., Some(NOW + 3_600_000), Some(NOW + 86_400_000));
-        assert_eq!(account_reset(&a, NOW), Some(NOW + 3_660_000));
+    fn with_room_it_waits_for_the_next_used_window_to_refill() {
+        let a = account("a", 30., 60., Some(NOW + HOUR), Some(NOW + 24 * HOUR));
+        assert_eq!(account_reset(&a, NOW), Some(NOW + HOUR + 60_000));
     }
+
     #[test]
-    fn unknown_stale_or_expired_blocking_resets_are_not_guessed() {
-        let mut a = account("a", 0., 0., Some(NOW + 3_600_000), None);
-        assert_eq!(account_reset(&a, NOW), None);
-        a = account("a", 0., 50., Some(NOW - 1), Some(NOW + 86_400_000));
-        assert_eq!(account_reset(&a, NOW), None);
-        a = account("a", 20., 50., Some(NOW + 3_600_000), Some(NOW + 86_400_000));
-        a.usage.as_mut().unwrap()["stale"] = json!(true);
-        assert_eq!(account_reset(&a, NOW), None);
-        assert_eq!(account_reset(&Account::default(), NOW), None);
-    }
-    #[test]
-    fn provider_block_with_room_uses_the_tightest_window() {
-        let mut a = account("a", 30., 2., Some(NOW + 3_600_000), Some(NOW + 86_400_000));
+    fn a_blocked_login_with_room_waits_for_its_tightest_window() {
+        let mut a = account("a", 30., 2., Some(NOW + HOUR), Some(NOW + 24 * HOUR));
         a.usage.as_mut().unwrap()["blocked"] = json!(true);
-        assert_eq!(account_reset(&a, NOW), Some(NOW + 86_460_000));
+        assert_eq!(account_reset(&a, NOW), Some(NOW + 24 * HOUR + 60_000));
     }
+
     #[test]
-    fn pool_uses_earliest_member_with_room_after_reset_on_the_same_provider() {
-        let a = account("a", 0., 0., Some(NOW + 1_000_000), Some(NOW + 8_000_000));
-        let b = account("b", 0., 50., Some(NOW + 4_000_000), None);
-        let mut c = account("c", 0., 50., Some(NOW + 2_000_000), None);
+    fn missing_old_or_gone_by_resets_arent_guessed() {
+        let a = account("a", 0., 0., Some(NOW + HOUR), None);
+        assert_eq!(
+            account_reset(&a, NOW),
+            None,
+            "a window holding it back has no reset"
+        );
+        let a = account("a", 0., 50., Some(NOW - 1), Some(NOW + 24 * HOUR));
+        assert_eq!(account_reset(&a, NOW), None, "its reset has gone by");
+        let mut a = account("a", 20., 50., Some(NOW + HOUR), Some(NOW + 24 * HOUR));
+        a.usage.as_mut().unwrap()["stale"] = json!(true);
+        assert_eq!(account_reset(&a, NOW), None, "old readings");
+        let mut a = account("a", 0., 50., Some(NOW + HOUR), Some(NOW + 24 * HOUR));
+        a.signed_out = true;
+        assert_eq!(
+            account_reset(&a, NOW),
+            None,
+            "only signing in brings it back"
+        );
+        assert_eq!(account_reset(&Account::default(), NOW), None, "no readings");
+    }
+
+    #[test]
+    fn a_pool_goes_by_its_earliest_login_of_the_boxs_kind() {
+        let a = account("a", 0., 0., Some(NOW + HOUR), Some(NOW + 8 * HOUR));
+        let b = account("b", 0., 50., Some(NOW + 4 * HOUR), None);
+        let mut c = account("c", 0., 50., Some(NOW + 2 * HOUR), None);
         c.provider = "claude".into();
         let logins = RunnerLogins {
             accounts: vec![a, b, c],
@@ -175,11 +261,15 @@ mod tests {
         };
         assert_eq!(
             token_reset(&logins, "a", Some("p"), "codex", NOW),
-            Some(NOW + 4_060_000)
+            Some(NOW + 4 * HOUR + 60_000)
+        );
+        assert_eq!(
+            token_reset(&logins, "a", Some("p"), "claude", NOW),
+            Some(NOW + 2 * HOUR + 60_000)
         );
         assert_eq!(
             token_reset(&logins, "a", None, "codex", NOW),
-            Some(NOW + 8_060_000)
+            Some(NOW + 8 * HOUR + 60_000)
         );
         assert_eq!(
             token_reset(&logins, "a", Some("missing"), "codex", NOW),

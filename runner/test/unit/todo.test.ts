@@ -118,3 +118,16 @@ test("a todo's links are in its Highlights, with no agent run", () => {
   assert.ok(hl.some((x) => x.kind === 'pr' || x.url === 'https://github.com/convex/workpool/pull/220'), JSON.stringify(hl));
   assert.equal(h.adapter.sessions.length, 0);
 });
+
+test('a message held below the permission ceiling leaves a todo unstarted', async () => {
+  const h = makeHarness();
+  const { thread } = h.runner.createTodo({ text: note, permissionMode: 'full' });
+  h.runner.send(thread.id, 'Run the saved task', [], { ceiling: 'ask' });
+  await tick();
+  assert.equal(h.adapter.sessions.length, 0);
+  assert.equal(h.runner.get(thread.id).todo, true);
+  h.runner.send(thread.id, 'Summarise it for me');
+  await tick();
+  assert.equal(h.runner.get(thread.id).todo, undefined);
+  assert.ok(!h.adapter.last.sent[0].text.includes('Run the saved task'));
+});

@@ -1,7 +1,10 @@
-// The Send arrow and right-click menu offer quick one-off schedule times.
-// Schedule… opens the full editor, as "+" > Schedule… does.
-// Not on another Mac's thread, or a new one for another Mac: their schedules
-// are made from there.
+// Sending the message later, as Mail and Slack do: the arrow beside Send,
+// and right-clicking Send (ComposerControls.swift, the `iconContextMenu` on
+// SendButton), offer tonight at 9 pm, tomorrow at 9 am and the next known
+// token reset (threadbear_core::send_later), each opening the schedule
+// editor on Once at that time, and Schedule… for any other, as "+" >
+// Schedule… does. Not on another Mac's thread, or a new one for another
+// Mac: their schedules are made from there.
 use crate::a11y::A11yRole as _;
 use crate::composer::Composer;
 use crate::tips::Tip as _;
@@ -9,103 +12,23 @@ use gpui_kit::assets::IconName;
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
-use gpui_kit::component::{h_flex, Sizable as _};
+use gpui_kit::component::{h_flex, Icon, Sizable as _};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use threadbear_core::chrono::Local;
-use threadbear_core::{schedules, send_later};
+use threadbear_core::send_later::{self, Preset};
 
+/// The menu's last item, as the Swift menu names it.
 pub(crate) const SCHEDULE_TITLE: &str = "Schedule…";
 
+/// What the send button's states are called to VoiceOver and to a script
+/// (SendButton's accessibility labels).
 #[cfg(feature = "automation")]
 const SEND_BUTTON_NAMES: [&str; 4] = ["Send", "Stop", "Stopping", "Starting the thread"];
 
-#[derive(Clone, Copy)]
-enum Preset {
-    Tonight,
-    Tomorrow,
-    Tokens,
-}
-
-fn preset_time(composer: &Composer, preset: Preset, cx: &App) -> Option<i64> {
-    let now = Local::now();
-    match preset {
-        Preset::Tonight => send_later::tonight(&now),
-        Preset::Tomorrow => send_later::tomorrow(&now),
-        Preset::Tokens => {
-            let data = composer.chip_data(cx);
-            let summary = data.summary.as_ref()?;
-            send_later::token_reset(
-                &data.logins,
-                &summary.account_id,
-                summary.pool_id.as_deref(),
-                &summary.provider,
-                now.timestamp_millis(),
-            )
-        }
-    }
-}
-
-fn send_menu(mut menu: PopupMenu, composer: WeakEntity<Composer>, cx: &mut App) -> PopupMenu {
-    let Some(c) = composer.upgrade() else {
-        return menu;
-    };
-    for (preset, title) in [
-        (Preset::Tonight, "Send tonight at 9 pm…"),
-        (Preset::Tomorrow, "Send tomorrow at 9 am…"),
-        (Preset::Tokens, "Send when tokens reset…"),
-    ] {
-        let at = preset_time(c.read(cx), preset, cx);
-        // After 9 pm, don't call tomorrow night "tonight".
-        if matches!(preset, Preset::Tonight) && at.is_none() {
-            continue;
-        }
-        let title = if matches!(preset, Preset::Tokens) {
-            match at {
-                Some(at) => format!(
-                    "Send when tokens reset ({})…",
-                    schedules::full_time(at, &Local)
-                ),
-                None => "Send when tokens reset (time unavailable)".into(),
-            }
-        } else {
-            title.to_owned()
-        };
-        let composer = composer.clone();
-        menu = menu.item(
-            PopupMenuItem::new(title)
-                .disabled(at.is_none())
-                .icon(crate::icons::symbol("clock"))
-                .on_click(move |_, window, cx| {
-                    let Some(c) = composer.upgrade() else { return };
-                    // Re-read the time and selected login when chosen: a menu can
-                    // stay open past a reset or midnight.
-                    let Some(at) = preset_time(c.read(cx), preset, cx) else {
-                        return;
-                    };
-                    let Some(app) = c.read(cx).app.upgrade() else {
-                        return;
-                    };
-                    app.update(cx, |app, cx| {
-                        app.new_schedule_from_composer_at(&c, Some(at), window, cx)
-                    });
-                }),
-        );
-    }
-    menu.separator().item(
-        PopupMenuItem::new(SCHEDULE_TITLE)
-            .icon(crate::icons::symbol("clock"))
-            .on_click(move |_, window, cx| {
-                let Some(c) = composer.upgrade() else { return };
-                let Some(app) = c.read(cx).app.upgrade() else {
-                    return;
-                };
-                app.update(cx, |app, cx| app.new_schedule_from_composer(&c, window, cx));
-            }),
-    )
-}
-
 impl Composer {
+    /// Whether Send offers to send later: the runner keeps schedules, and
+    /// the box's thread (or new one) is on this Mac's.
     pub(crate) fn schedules_from_send(&self, cx: &App) -> bool {
         self.chip_data(cx).away.is_none()
             && self
@@ -114,40 +37,117 @@ impl Composer {
                 .is_some_and(|a| a.read(cx).schedules_supported)
     }
 
-    /// The visible arrow and Send's right-click share one menu. Presets
-    /// open the existing editor, preserving its attachment warning, errors,
-    /// draft handling and the chance to check the exact time before saving.
+    /// The next known reset of the box's login, or of its pool's logins of
+    /// the box's kind, plus a minute.
+    fn token_reset_at(&self, cx: &App) -> Option<i64> {
+        let data = self.chip_data(cx);
+        let s = data.summary.as_ref()?;
+        let provider = if s.provider.is_empty() {
+            "claude"
+        } else {
+            s.provider.as_str()
+        };
+        send_later::token_reset(
+            &data.logins,
+            &s.account_id,
+            s.pool_id.as_deref(),
+            provider,
+            crate::now_ms(),
+        )
+    }
+
+    /// The send button (or Stop, or a spinner, as it stands) with its
+    /// right-click menu and the arrow beside it, when there's something
+    /// for them to offer.
     pub(crate) fn with_send_menu(&self, button: AnyElement, cx: &mut Context<Self>) -> AnyElement {
         if !self.schedules_from_send(cx) {
             return button;
         }
         let composer = cx.entity().downgrade();
-        let dropdown_composer = composer.clone();
-        let dropdown = Button::new("composer-send-later")
-            .icon(IconName::ChevronDown)
+        let for_arrow = composer.clone();
+        let tip = "Send later: tonight, tomorrow or when tokens reset";
+        let arrow = Button::new("composer-send-later-button")
+            // As quiet as the chips' arrows beside it, not the full white
+            // a ghost button's icon takes.
+            .icon(Icon::from(IconName::ChevronDown).text_color(crate::style::quiet_text(cx)))
             .small()
             .ghost()
-            .dropdown_menu(move |menu, _, cx| send_menu(menu, dropdown_composer.clone(), cx));
+            .dropdown_menu(move |menu: PopupMenu, _, cx| send_menu(menu, &for_arrow, cx));
         h_flex()
             .flex_none()
+            .items_center()
             .child(
                 div()
                     .id("composer-send-menu")
                     .flex_none()
                     .child(button)
-                    .context_menu(move |menu, _, cx| send_menu(menu, composer.clone(), cx)),
+                    .context_menu(move |menu, _, cx| send_menu(menu, &composer, cx)),
             )
             .child(
                 div()
-                    .id("composer-send-later-control")
+                    .id("composer-send-later")
+                    .flex_none()
                     .test_support()
                     .a11y_role(Role::GenericContainer)
                     .aria_label("Send later")
-                    .child(dropdown)
-                    .tip("Send later: tonight, tomorrow or when tokens reset"),
+                    .child(arrow)
+                    .tip(tip),
             )
             .into_any_element()
     }
+}
+
+/// The quick times, then Schedule…, for the arrow and the right-click alike.
+fn send_menu(menu: PopupMenu, composer: &WeakEntity<Composer>, cx: &mut App) -> PopupMenu {
+    let Some(c) = composer.upgrade() else {
+        return menu;
+    };
+    let reset = c.read(cx).token_reset_at(cx);
+    let mut menu = menu;
+    for choice in send_later::choices(&Local::now(), reset) {
+        let composer = composer.clone();
+        let preset = choice.preset;
+        menu = menu.item(
+            PopupMenuItem::new(choice.title)
+                .icon(crate::icons::symbol("clock"))
+                .disabled(choice.at.is_none())
+                .on_click(move |_, window, cx| {
+                    let Some(c) = composer.upgrade() else {
+                        return;
+                    };
+                    // Worked out again as it's picked: a menu can stay up
+                    // past 9 pm, midnight or a reset.
+                    let now = Local::now();
+                    let at = match preset {
+                        Preset::Tonight => send_later::tonight(&now),
+                        Preset::Tomorrow => send_later::tomorrow(&now),
+                        Preset::TokenReset => c.read(cx).token_reset_at(cx),
+                    };
+                    let Some(app) = c.read(cx).app.upgrade() else {
+                        return;
+                    };
+                    app.update(cx, |app, cx| {
+                        app.new_schedule_from_composer_at(&c, at, window, cx)
+                    });
+                }),
+        );
+    }
+    let composer = composer.clone();
+    menu.separator().item(
+        PopupMenuItem::new(SCHEDULE_TITLE)
+            .icon(crate::icons::symbol("clock"))
+            .on_click(move |_, window, cx| {
+                let Some(composer) = composer.upgrade() else {
+                    return;
+                };
+                let Some(app) = composer.read(cx).app.upgrade() else {
+                    return;
+                };
+                app.update(cx, |app, cx| {
+                    app.new_schedule_from_composer(&composer, window, cx)
+                });
+            }),
+    )
 }
 
 /// The automation's `composer-menu` for `send` (both apps): a right-click on

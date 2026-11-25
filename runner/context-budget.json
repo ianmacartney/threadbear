@@ -1,13 +1,13 @@
 {
   "claude": {
-    "instructions": 3095,
-    "tools": 40870,
-    "total": 43965
+    "instructions": 3112,
+    "tools": 41072,
+    "total": 44184
   },
   "codex": {
-    "instructions": 2269,
-    "tools": 40969,
-    "total": 43238
+    "instructions": 2286,
+    "tools": 41171,
+    "total": 43457
   },
   "worktreeInstructions": 591,
   "perTool": {
@@ -17,7 +17,7 @@
     "create_thread": 2707,
     "delete_schedule": 267,
     "delete_thread": 445,
-    "end_turn": 9148,
+    "end_turn": 9309,
     "interrupt_thread": 335,
     "join_project": 524,
     "leave_project": 460,
@@ -32,7 +32,7 @@
     "read_thread": 520,
     "schedule_message": 3313,
     "send_message": 562,
-    "show_options": 2304,
+    "show_options": 2345,
     "show_panel": 1400,
     "unpin": 300,
     "update_project": 3239,

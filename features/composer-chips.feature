@@ -117,6 +117,40 @@ Feature: The chips under the message box
     When I right-click Send and choose "Schedule…"
     Then the schedule editor is open on a new schedule that sends "Check the backups tonight"
 
+  # The arrow beside Send and its quick times are the GPUI app's; the Swift
+  # app is frozen.
+  @composer.schedulefromsend @swift-pending
+  Scenario: The arrow beside Send offers quick times to send the message later
+    When I open the Send later menu beside Send
+    Then the Send later menu offers "Send tomorrow at 9 am…" and a time for when tokens reset
+
+  @composer.schedulefromsend @swift-pending
+  Scenario: Send tomorrow opens the schedule editor on Once, at 9 tomorrow morning
+    When I type "Check the backups tomorrow" in the composer
+    Then right-clicking Send offers "Send tomorrow at 9 am… | Schedule…"
+    When I right-click Send and choose "Send tomorrow at 9 am…"
+    Then the schedule editor is open on a new schedule that sends "Check the backups tomorrow"
+    And the schedule is set to send once, tomorrow at 9 am
+
+  # Morning brief is on the Claude pool, whose alex+4 is out of room until
+  # its 5-hour window resets; the others have room or old readings.
+  @composer.schedulefromsend @swift-pending
+  Scenario: Send when tokens reset waits for the pool's first login back, plus a minute
+    When I type "Run the checks after my allowance resets" in the composer
+    And I choose when tokens reset from Send's right-click
+    Then the schedule editor is open on a new schedule that sends "Run the checks after my allowance resets"
+    And the schedule is set to send once, a minute after "claude-4"'s 5-hour window resets
+
+  @composer.schedulefromsend @swift-pending
+  Scenario: A quick time from the new-thread box saves a schedule that starts a new thread
+    When I start a new thread
+    And I type "Review tomorrow's build" in the composer
+    And I right-click Send and choose "Send tomorrow at 9 am…"
+    And I save the schedule in the editor
+    And I click "Scheduled" in the activity bar
+    Then the "Active" section lists "Review tomorrow's build"
+    And the schedule "Review tomorrow's build" sends to "New thread in misc"
+
   @composer.schedulefromsend @remote-threads
   Scenario: Another Mac's thread has no Schedule… on Send, as its schedules are made there
     When I open the thread "Check the photo library backup"
@@ -176,37 +210,3 @@ Feature: The chips under the message box
     When I put the cursor in the composer
     And I press ⌘Z
     Then the composer holds 1 picture
-
-  # Quick send presets are new desktop UI; the Swift app is frozen.
-  @composer.schedulefromsend @swift-pending
-  Scenario: Send tomorrow prepares a one-off with the composer's message
-    When I type "Check the backups tomorrow" in the composer
-    Then right-clicking Send offers "Send tomorrow at 9 am…"
-    When I right-click Send and choose "Send tomorrow at 9 am…"
-    Then the schedule editor is open on a new schedule that sends "Check the backups tomorrow"
-    And the schedule is set to send once tomorrow at 9 am
-
-  # Quick send presets are new desktop UI; the Swift app is frozen.
-  @composer.schedulefromsend @swift-pending
-  Scenario: Send at the known reset uses the pool's earliest replenishment
-    When I type "Run the checks after my allowance resets" in the composer
-    And I choose the known token reset from Send
-    Then the schedule editor is open on a new schedule that sends "Run the checks after my allowance resets"
-    And the schedule waits until a pool login resets plus one minute
-
-  # Quick send presets are new desktop UI; the Swift app is frozen.
-  @composer.schedulefromsend @swift-pending
-  Scenario: The quick send choices are discoverable without right-clicking
-    When I open the visible Send later menu
-    Then the Send later menu shows the quick choices
-
-  # Quick send presets are new desktop UI; the Swift app is frozen.
-  @composer.schedulefromsend @swift-pending
-  Scenario: A quick send saves a new thread for tomorrow without starting it now
-    When I start a new thread
-    And I type "Review tomorrow's build" in the composer
-    And I right-click Send and choose "Send tomorrow at 9 am…"
-    And I save the prepared send time
-    And I click "Scheduled" in the activity bar
-    Then the "Active" section lists "Review tomorrow's build"
-    And the schedule "Review tomorrow's build" sends to "New thread in misc"

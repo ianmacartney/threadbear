@@ -206,6 +206,8 @@ impl Threadbear {
         self.new_schedule_from_composer_at(composer, None, window, cx);
     }
 
+    /// The same, set to send once at `at_ms` (Send's quick times,
+    /// composer_send.rs); None leaves the editor as Schedule… opens it.
     pub(crate) fn new_schedule_from_composer_at(
         &mut self,
         composer: &Entity<crate::composer::Composer>,

@@ -16,7 +16,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import type { ThreadState } from '../runner.ts';
-import { checkImages, effortTitle, isClaudeModel, modelRow, modelTitle, newRuntime, oneLine, titleFrom, userMessage } from '../runner.ts';
+import { checkImages, oneLine, titleFrom, userMessage } from './messages.ts';
+import { effortTitle, isClaudeModel, modelRow, modelTitle } from './models.ts';
+import { newRuntime } from './runtime.ts';
 import { providerInfo, providerName } from '../providers.ts';
 import { cutSafely } from '../safe-cut.ts';
 
@@ -32,6 +34,7 @@ export type CreateThreadParams = {
   permissionMode?: PermissionMode;
   title?: string;
   origin?: MessageOrigin;
+  wakeReason?: string;
   scheduleId?: string;
   // false: start in the folder as it is, even in a repo that asks for a
   // worktree per thread.
@@ -72,7 +75,7 @@ export const newThreadsPart = {
     const { st, notes, loginNote } = made;
     if (spare) this.cli(st, { kind: 'claim', spare });
     if (projectIds.length) this.projects!.changeMembership(st.rec.id, { add: projectIds, by: 'mike' });
-    const turnId = this.sendTo(st, params.text ?? '', params.images ?? [], { origin: params.origin, scheduleId: params.scheduleId });
+    const turnId = this.sendTo(st, params.text ?? '', params.images ?? [], { origin: params.origin, wakeReason: params.wakeReason, scheduleId: params.scheduleId });
     // Under the first turn, so they read as part of starting it.
     for (const text of notes) this.emit(st, { type: 'system.note', text }, st.rt.turn?.turnId ?? turnId);
     // Kept on show by its shape, as moveLogin's is (is_login_note).
@@ -114,7 +117,7 @@ export const newThreadsPart = {
     return { thread: this.summary(st) };
   },
 
-  // A quick ask the phone already answered out loud (docs/protocol.md, Sync,
+  // A quick ask the phone already answered out loud (docs/protocol/moves.md, Sync,
   // "quickAsk"), kept as a thread so Mike can carry on in it. It's made as a
   // create with no folder would be, but no turn runs: the exchange is
   // written as a finished turn, seen, and the first message sent to it

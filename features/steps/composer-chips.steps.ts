@@ -68,9 +68,11 @@ async function sendMenu(world: ThreadbearWorld): Promise<string[]> {
   return JSON.parse(out.slice(out.indexOf('['))) as string[];
 }
 
+// Among the rest: the quick times above Schedule… change with the clock
+// (tonight's is gone after 9 pm) and the logins' resets.
 Then('right-clicking Send offers {string}', async function (this: ThreadbearWorld, items: string) {
-  const actual = await sendMenu(this);
-  for (const item of items.split(' | ')) assert.ok(actual.includes(item), `missing ${item}: ${actual.join(', ')}`);
+  const offered = await sendMenu(this);
+  for (const item of items.split(' | ')) assert.ok(offered.includes(item), `no ${item} in ${offered.join(', ')}`);
 });
 
 // With nothing of its own, the right-click is the panel's (Hide Title and
@@ -174,47 +176,52 @@ When('I remove picture {int} with its ×', async function (this: ThreadbearWorld
   assert.equal(await this.app.do({ cmd: 'composer-peek', strip: picture - 1, remove: true }), 'ok removed');
 });
 
-Then('the schedule is set to send once tomorrow at 9 am', async function (this: ThreadbearWorld) {
-  type Editor = { once: boolean; at: string };
-  const editor = await this.until('the schedule editor', (d) => (d as unknown as { scheduleEditor?: Editor }).scheduleEditor);
-  assert.equal(editor.once, true);
-  const date = new Date(editor.at);
+// The quick send times (composer_send.rs). The schedule editor's dump has
+// its time as `at`.
+type QuickEditor = { once: boolean; at: string; preview?: string };
+const quickEditor = (world: ThreadbearWorld) =>
+  world.until('the schedule editor', (d) => (d as unknown as { scheduleEditor?: QuickEditor }).scheduleEditor);
+
+Then('the schedule is set to send once, tomorrow at 9 am', async function (this: ThreadbearWorld) {
+  const editor = await quickEditor(this);
+  assert.equal(editor.once, true, 'it opened on a repeating schedule');
+  const at = new Date(editor.at);
   const tomorrow = new Date();
   tomorrow.setDate(tomorrow.getDate() + 1);
-  assert.equal(date.toDateString(), tomorrow.toDateString());
-  assert.equal(date.getHours(), 9);
-  assert.equal(date.getMinutes(), 0);
+  assert.equal(at.toDateString(), tomorrow.toDateString());
+  assert.deepEqual([at.getHours(), at.getMinutes()], [9, 0]);
 });
 
-When('I choose the known token reset from Send', async function (this: ThreadbearWorld) {
+When('I choose when tokens reset from Send\'s right-click', async function (this: ThreadbearWorld) {
   const items = await sendMenu(this);
-  const item = items.find((title) => title.startsWith('Send when tokens reset (') && !title.includes('unavailable'));
-  assert.ok(item, `no known reset: ${items.join(', ')}`);
+  const item = items.find((title) => title.startsWith('Send when tokens reset ('));
+  assert.ok(item && !item.includes('not known'), `no known reset: ${items.join(', ')}`);
   await this.app.do({ cmd: 'composer-menu', menu: 'send', click: item });
 });
 
-Then('the schedule waits until a pool login resets plus one minute', async function (this: ThreadbearWorld) {
+Then('the schedule is set to send once, a minute after {string}\'s 5-hour window resets', async function (this: ThreadbearWorld, account: string) {
   const out = await this.app.do({ cmd: 'mock', method: 'accounts', params: {} });
-  const { accounts } = JSON.parse(out.slice(out.indexOf('{')));
-  const reset = accounts.find((a: { id: string }) => a.id === 'claude-4').usage.windows.find((w: { kind: string }) => w.kind === 'five_hour').resetsAt;
-  type Editor = { once: boolean; at: string };
-  const editor = await this.until('the schedule editor', (d) => (d as unknown as { scheduleEditor?: Editor }).scheduleEditor);
-  assert.equal(editor.once, true);
+  type Window = { kind: string; resetsAt: string };
+  const { accounts } = JSON.parse(out.slice(out.indexOf('{'))) as { accounts: { id: string; usage: { windows: Window[] } }[] };
+  const reset = accounts.find((a) => a.id === account)?.usage.windows.find((w) => w.kind === 'five_hour')?.resetsAt;
+  assert.ok(reset, `${account} has no 5-hour reset`);
+  const editor = await quickEditor(this);
+  assert.equal(editor.once, true, 'it opened on a repeating schedule');
   assert.equal(Date.parse(editor.at), Date.parse(reset) + 60_000);
 });
 
-When('I open the visible Send later menu', async function (this: ThreadbearWorld) {
+When('I open the Send later menu beside Send', async function (this: ThreadbearWorld) {
   await this.app.do({ cmd: 'click', title: 'Send later' });
 });
 
-Then('the Send later menu shows the quick choices', async function (this: ThreadbearWorld) {
+Then('the Send later menu offers {string} and a time for when tokens reset', async function (this: ThreadbearWorld, item: string) {
   const out = await this.app.do({ cmd: 'context-menus' });
-  assert.ok(out.includes('Send tomorrow at 9 am'), out);
-  assert.ok(out.includes('Send when tokens reset'), out);
+  assert.ok(out.includes(item), out);
+  assert.match(out, /Send when tokens reset \((?!time not known)/);
 });
 
-When('I save the prepared send time', async function (this: ThreadbearWorld) {
-  await this.until('the prepared schedule ready to save', (d) => Boolean((d as unknown as { scheduleEditor?: { preview?: string } }).scheduleEditor?.preview));
+When('I save the schedule in the editor', async function (this: ThreadbearWorld) {
+  await this.until('the schedule ready to save', (d) => Boolean((d as unknown as { scheduleEditor?: QuickEditor }).scheduleEditor?.preview));
   await this.app.do({ cmd: 'click', title: 'Schedule' });
   await this.until('the schedule saved', (d) => !(d as unknown as { scheduleEditor?: unknown }).scheduleEditor && d.composer.text === '');
 });
